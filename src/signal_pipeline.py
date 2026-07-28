@@ -184,9 +184,9 @@ def scan(progress: Progress = _noop):
     title_patterns list, classifier enabled.
     """
     from scanner import pipeline as scanner_pipeline
-    from scanner.config import Config
+    from scanner import config as scanner_config
 
-    cfg = Config.load(config.SCANNER_CONFIG_PATH)
+    cfg = scanner_config.load(config.SCANNER_CONFIG_PATH)
 
     # Assert rather than mutate. If someone edits config.yaml to recency_days=7
     # for a manual investigation and forgets to put it back, the 9 AM run must

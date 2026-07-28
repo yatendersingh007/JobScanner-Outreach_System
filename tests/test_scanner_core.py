@@ -19,14 +19,14 @@ import pytest
 import yaml
 
 from scanner.pipeline import _compile_excludes, _compile_patterns, _title_matches
-from scanner.config import Config
+from scanner import config as scanner_config
 from src import wd_dbc, signal_pipeline
 from src.signal_pipeline import FirmGroup, group_by_company
 
 
 @pytest.fixture(scope="module")
 def cfg():
-    return Config.load("scanner/config.yaml")
+    return scanner_config.load("scanner/config.yaml")
 
 
 @pytest.fixture(scope="module")

@@ -1,0 +1,42 @@
+# Workflow D dependencies — union of lib_referral/ + lib_snapshot/ (from
+# referral-system, commit 078493aa00e27dcd17716c0f57bb6d0ae35644da) and
+# scanner/ (from job-scanner, commit 8a5392cefbcbdf4f1dc8454ac464389d35ce230f)
+# transitive external-package closures. Versions mirror the donor repos'
+# own pins where a shared package is vendored, so the vendored code runs
+# against the same library versions it was written and tested against.
+
+python-dotenv==1.0.1
+
+# Postgres (lib_snapshot/db.py: connection pool, queue helpers). psycopg 3
+# with binary wheels + pool.
+psycopg[binary]==3.2.3
+psycopg-pool==3.2.4
+
+# LLM: OpenAI-compatible client (lib_snapshot/models.py). Provider switch =
+# LLM_BASE_URL env only. httpx is pulled in transitively by openai; not
+# pinned directly here (referral-system only pins it for exa-py
+# compatibility, and exa_client.py is not part of this vendored closure).
+openai==2.46.0
+
+# HTTP for Tavily/Apollo (lib_snapshot/) and JSearch/TinyFish/ATS (scanner/).
+requests==2.32.3
+
+# Gmail drafts (lib_referral/gmail_client.py). Scope: gmail.compose only.
+# Installed-app OAuth flow.
+google-api-python-client==2.149.0
+google-auth==2.35.0
+google-auth-oauthlib==1.2.1
+google-auth-httplib2==0.2.0
+
+# scanner/classifier.py + scanner/config.py: config.yaml / classifier_rules.yaml.
+PyYAML==6.0.2
+
+# lib_referral/icp_gate.py + src/matching/normalize.py: fuzzy name matching
+# (own-domain resolution, token_sort_ratio).
+rapidfuzz==3.10.1
+
+# Not exercised by the current vendored closure (openpyxl is used by
+# referral-system's src/batch_upload.py, which is not vendored here) —
+# pinned anyway per standing instruction, so it matches referral-system's
+# own pin if a future prompt needs .xlsx handling.
+openpyxl==3.1.5
