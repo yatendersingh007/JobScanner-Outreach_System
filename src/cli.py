@@ -15,7 +15,7 @@ import argparse
 import sys
 
 from . import wd_config as config
-from .run_scan import run_scan, summarize
+from .run_scan import run_scan, run_single_firm, summarize
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,10 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scan_p.add_argument(
         "--firm", type=str, default=None, metavar="NAME",
-        help='Single-firm override, skips the scanner entirely. Not built '
-             'yet (prompt 2). The argument is accepted so the surface '
-             'matches the eventual /scan "Firm" command, but using it today '
-             "is an error, not a silent no-op.",
+        help='Single-firm override, skips the scanner entirely.',
     )
     return parser
 
@@ -61,22 +58,18 @@ def main(argv: list | None = None) -> int:
         parser.print_help()
         return 1
 
-    if args.firm:
-        print(
-            f'--firm "{args.firm}": single-firm override is not built yet '
-            "(prompt 2). Run a full scan for now.",
-            file=sys.stderr,
-        )
-        return 2
-
     try:
-        result = run_scan(
-            mode="manual",
-            days=args.days,
-            dry=args.dry,
-            gate_cap=args.cap,
-            progress=print,
-        )
+        if args.firm:
+            result = run_single_firm(mode="manual", firm_name=args.firm,
+                                     dry=args.dry, progress=print)
+        else:
+            result = run_scan(
+                mode="manual",
+                days=args.days,
+                dry=args.dry,
+                gate_cap=args.cap,
+                progress=print,
+            )
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -85,7 +78,7 @@ def main(argv: list | None = None) -> int:
         raise
 
     print("")
-    print(summarize(result))
+    print(summarize(result, dry_hint="--dry"))
     return 0
 
 

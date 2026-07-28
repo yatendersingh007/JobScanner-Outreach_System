@@ -255,3 +255,146 @@ Tests: 86 passed, 0 failures (no count change, this was a refactor not new
 coverage).
 
 Committed together with the above.
+
+## Prompt 2 - Telegram bot: the only way a run starts - 2026-07-28
+
+Three additions done before the main build:
+
+1. **wd_telegram.py's `progress()` fixed** (our bug, not a donor issue — see
+   the Prompt 2 diagnose entry above). Ported both of `_LiveBatchStatus`'s
+   adversarial-review fixes: `_dispatch_edit()` now runs the actual
+   `editMessageText` call on a background daemon thread, never on the
+   pipeline's own calling thread; the throttle timestamp and a new dedup-text
+   field are claimed synchronously and unconditionally before the dispatch,
+   not only on success. Added `finish(reason)` for terminal states
+   (`done`/`cancelled`/`crashed` → `"Done."`/`"Cancelled."`/`"Crashed."`,
+   replacing the live line entirely rather than leaving it frozen mid-firm,
+   bypassing the throttle since a run only finishes once). 10 new tests in
+   `tests/test_wd_telegram.py` using a synchronous `threading.Thread`
+   stand-in and a fake clock — no live token, no real network.
+2. **`wd_dbc.latest_running_run()` added**, filtering to `status = 'running'`
+   only. 3 new tests in `tests/test_wd_dbc.py`, using an in-memory fake
+   cursor that inspects the literal SQL for the status filter (no real
+   Postgres available in this environment — noted as a real limitation:
+   this proves the query text is right, not that Postgres evaluates it the
+   same way, though it does catch the specific regression class — a loosened
+   or dropped filter — this test exists for).
+3. **`_parse_quoted`/`_parse_aum` compared empirically, not eyeballed.**
+   Ran the donor's exact code (transcribed for comparison only, not
+   imported) against an independent reimplementation across 9 quoted-name
+   cases and 8 AUM cases. `_parse_aum`: zero divergence across all 8 cases.
+   `_parse_quoted`: **2 divergences found**, both the same root cause — the
+   donor treats ANY quote character as a closer, regardless of which one
+   opened. `"O'Brien Capital" 450M` → donor parses firm=`"O"`, "AUM"=
+   `'Brien Capital" 450M'` (the apostrophe closes it early); a nested-quote
+   case fails the same way. My reimplementation closes on the SAME quote
+   character that opened, parsing both correctly. Decision: **shipped the
+   corrected version**, since this is new code (not a vendored file — no
+   "reuse unchanged" obligation) and the donor's behavior is a real
+   correctness bug for any firm name containing an apostrophe, which would
+   cause `/qualify`/`/disqualify` to look up the wrong (or a nonexistent)
+   parked firm. Documented in `src/bot.py`'s module docstring, not silently
+   picked.
+
+Built:
+- `src/bot.py`: long-poll loop (`run_bot()`) with `AUTHORIZED_USER_IDS`
+  checked in a new `_process_updates()` helper — factored out specifically so
+  the authorization boundary is testable without touching the infinite loop
+  or a live token, called before `_dispatch` is ever reached, exactly as
+  referral-system does it. Commands: `/scan` (bare, `dry`, `days N`,
+  `"Firm"`, `stop` as a `/cancel` alias), `/status`, `/qualify`,
+  `/disqualify`, `/cancel`, `/resume`, `/help`/`/start`. `_dispatch` is a
+  pure router with zero authorization logic and zero business logic — it
+  parses, calls `run_scan`/`run_single_firm`/`run_resume`/`wd_dbc`, and
+  formats.
+- `src/run_scan.py`: added `run_single_firm(mode, firm_name, dry, progress)`
+  and `run_resume(dry, progress)`. Both call `signal_pipeline.gate_group()`
+  and `signal_pipeline.dbc`'s existing helpers directly — new orchestration
+  on top of unchanged functions, not a change to `signal_pipeline.py` itself
+  (prompt 2's DO-NOT-CHANGE list has no "except to add" carve-out for
+  `signal_pipeline.py` the way it does for `wd_dbc.py`, so nothing in that
+  file was touched). `run_resume` is `wd_dbc.next_pending()`/
+  `set_queue_status()`'s first actual caller — both existed since Prompt 0/1
+  but `signal_pipeline.run()` only ever iterates its own in-memory
+  `to_gate` list, never reads the queue back. `summarize()` gained a
+  `dry_hint` parameter (`"--dry"` for the CLI, `"/scan dry"` for the bot) so
+  the same summary text never shows the wrong front door's flag syntax.
+- `src/cli.py`: `--firm` wired to `run_single_firm()` for real (was a
+  stub-error in Prompt 1's cleanup round).
+- `tests/test_bot_dispatch.py`: 38 tests. Every command routed via
+  `_dispatch`; the authorization boundary tested via the new
+  `_process_updates()` (an unauthorized sender never reaches
+  `_dispatch_message`, an authorized one does, the offset advances either
+  way); quoted names with commas/apostrophes; `/scan "dry"` rejected as a
+  command fragment and confirmed to never call `run_scan`/`run_single_firm`;
+  `/scan dry` vs bare `/scan`'s messaging (see below); the draft-intent
+  arithmetic at `DRAFT_CAP_PER_RUN=2` against 5 qualified; `/cancel`,
+  `/qualify` (in-band and out-of-band AUM, no-parked-firm, bad AUM text),
+  `/disqualify`, `/status` (empty and populated), `/resume` (nothing to
+  resume, and a real result).
+
+Command table:
+```
+/scan                   full run: scan, gate, draft (drafting not built yet -- stops after gating)
+/scan dry               stop after gating. No Apollo calls, no drafts. The opt-out.
+/scan days N            catch-up window after a gap (1-14)
+/scan "Firm"            single-firm override, skips the scanner entirely
+/scan stop              alias for /cancel
+/status                 last run's buckets, spend, queue depth
+/qualify "Firm" <AUM>   rescue a parked firm
+/disqualify "Firm"      reject a parked firm
+/cancel                 stop the active run cleanly, after the in-flight firm finishes
+/resume                 continue the latest crashed or cancelled run
+/help, /start
+```
+
+Reused verbatim (pattern, not literal code — see the diagnose entry above for
+the full reasoning): the polling-loop/authorization placement; `_dispatch`/
+`_dispatch_message` as a pure router; the persisted-cancel-flag mechanism
+(already built in Prompt 1, `/cancel` here just calls it); the `/qualify`/
+`/disqualify` shape (parse quoted firm+AUM, look up parked, validate the AUM
+band, update). Rewrote entirely: `_fmt_summary`'s buckets (workflow-d's own
+`summarize()` already existed from Prompt 1, shaped around its real
+pipeline); the whole batch/CSV-upload/pending-confirmation-gate state
+machine (no analog — Workflow D has no confirm gate at all); `_help_text()`.
+
+The two things explicitly checked this round:
+- **`/scan` with no args fails loudly, not silently dry**: confirmed by
+  `test_scan_no_args_fails_loudly_not_silently_dry` — asserts both "not
+  built yet" and "/scan dry" appear in what was sent, and that the
+  dry-run-specific line ("Dry run. Stopped after gating.") does NOT appear.
+  A separate test confirms `/scan dry` gets exactly the dry message and
+  never the "not built yet" note. This directly supersedes PROMPTS.md's
+  original "/scan with no args drafts" VERIFY line, which assumed drafting
+  existed; it doesn't yet.
+
+Tests: 137 passed (delta +51: +10 wd_telegram, +3 wd_dbc, +38 bot_dispatch),
+0 failures.
+
+Deviations from the prompt, and why:
+- `/scan "Firm"` and `/resume` required new orchestration functions
+  (`run_single_firm`, `run_resume`) that didn't exist before this prompt —
+  PROMPTS.md's command table lists both as things to build now, so this
+  isn't scope creep, but it's more than "src/bot.py" alone as the SCOPE line
+  named it. Both live in `run_scan.py`, not `bot.py`, keeping bot.py's own
+  "no business logic" rule intact.
+- Step 2a's spend-intent message omits a dollar estimate for Apollo/LLM
+  drafting cost. There's no real basis to estimate it — `apollo_enrich.py`
+  and drafting aren't wired up yet — so it reports the arithmetic that IS
+  known (qualified count, would-draft count against `DRAFT_CAP_PER_RUN`,
+  over-cap count) and states plainly that drafting isn't built, rather than
+  fabricating a spend figure.
+
+Open for next session:
+- `run_resume`'s DB-touching paths (`next_pending`, `set_queue_status`,
+  `firms_for_run` reload) are exercised only via `bot.py`'s mocked-out
+  dispatch tests, not against a real partially-completed run — worth a
+  dedicated integration-style test once there's a real drafting step to
+  actually crash mid-run against.
+- The `_parse_quoted` divergence and decision (above) should be treated as
+  a candidate fix to file against referral-system too, since it's a real
+  bug there, not just something workflow-d chose to do differently.
+- `/qualify`'s "continuing from Phase 3" (POC lookup + drafting) that
+  referral-system's version does after qualifying a firm has no equivalent
+  here yet — this build just marks the firm qualified and says so; prompts
+  3-4 landing drafting is what makes that continuation meaningful.

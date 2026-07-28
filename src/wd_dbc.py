@@ -118,6 +118,16 @@ def latest_resumable_run() -> Optional[dict]:
         return cur.fetchone()
 
 
+def latest_running_run() -> Optional[dict]:
+    """The currently-active run, if any -- /cancel targets this. Only
+    status='running' counts: a done/crashed/cancelled run is not active, and
+    setting cancel_requested_at on one would report success while changing
+    nothing (no per-firm loop is left to ever read the flag back)."""
+    with cursor() as cur:
+        cur.execute("SELECT * FROM wd_runs WHERE status = 'running' ORDER BY id DESC LIMIT 1")
+        return cur.fetchone()
+
+
 def request_run_cancellation(run_id: int) -> None:
     with conn() as c:
         with c.cursor() as cur:
