@@ -227,3 +227,31 @@ Open for next session:
   `is_new`/`first_seen` ordering donor observation (this prompt) both still
   need filing against referral-system / job-scanner respectively; neither has
   been filed yet.
+
+## Prompt 1 cleanups before prompt 2 - 2026-07-28
+
+1. `run_scan.main()`/`__main__` — checked the actual file rather than assume:
+   already absent. It was added in a first draft of `src/run_scan.py` and
+   removed in the same turn, before that draft was ever committed; the
+   committed version never had it. Nothing to delete.
+2. `RunResult.mode` and `RunResult.dry` are now real dataclass fields with
+   defaults (`mode: str = "manual"`, `dry: bool = False`), set at
+   construction time in `signal_pipeline.run()` (which now also takes a
+   `dry: bool = False` parameter purely to thread it into the `RunResult(...)`
+   call). `summarize()`'s `r.mode if hasattr(r, 'mode') else 'scan'` is now
+   plain `r.mode`; the `if r.dry` check is now plain `r.dry`, not
+   `getattr(r, "dry", False)`. `run_scan()` no longer does
+   `result.dry = dry` after the fact — it passes `dry=dry` straight through
+   to `signal_pipeline.run()`. `tests/test_recency_window.py`'s summary tests
+   now construct `RunResult(run_id=1, mode="manual", recency_days_used=N,
+   dry=False)` directly via keyword arguments, the same way `run()`
+   constructs it, instead of building a bare instance and using `setattr`.
+3. `--firm` **is** on prompt 2's list: PROMPTS.md's own command table for
+   prompt 2 lists `/scan "Firm" - single-firm override, skips the scanner
+   entirely`. Not a dead flag, just sequenced — prompt 2 is where it gets
+   wired to real logic.
+
+Tests: 86 passed, 0 failures (no count change, this was a refactor not new
+coverage).
+
+Committed together with the above.

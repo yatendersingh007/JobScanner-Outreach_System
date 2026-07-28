@@ -201,21 +201,19 @@ def test_run_default_recency_days_used_is_one(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# The catch-up window appears in the run summary when N > 1, not when N == 1
+# The catch-up window appears in the run summary when N > 1, not when N == 1.
+# Constructed the same way signal_pipeline.run() constructs it -- keyword
+# arguments to RunResult(), not attributes set after the fact -- since mode
+# and dry are real dataclass fields now.
 # ---------------------------------------------------------------------------
-def _bare_result(**overrides) -> RunResult:
-    r = RunResult(run_id=1)
-    for k, v in overrides.items():
-        setattr(r, k, v)
-    return r
-
-
 def test_summary_includes_catchup_line_when_over_one_day():
-    text = summarize(_bare_result(recency_days_used=7))
+    result = RunResult(run_id=1, mode="manual", recency_days_used=7, dry=False)
+    text = summarize(result)
     assert "Window: last 7 days (catch-up)" in text
     assert "not recoverable by widening further" in text
 
 
 def test_summary_omits_catchup_line_at_default_one_day():
-    text = summarize(_bare_result(recency_days_used=1))
+    result = RunResult(run_id=1, mode="manual", recency_days_used=1, dry=False)
+    text = summarize(result)
     assert "catch-up" not in text

@@ -21,7 +21,7 @@ log = logging.getLogger("workflow-d.run_scan")
 
 
 def summarize(r) -> str:
-    lines = [f"Workflow D run {r.run_id}: {r.mode if hasattr(r, 'mode') else 'scan'}"]
+    lines = [f"Workflow D run {r.run_id}: {r.mode}"]
     if r.recency_days_used > 1:
         lines.append(
             f"Window: last {r.recency_days_used} days (catch-up). Postings "
@@ -67,7 +67,7 @@ def summarize(r) -> str:
         f"CSV: {r.csv_path}",
     ]
 
-    if getattr(r, "dry", False):
+    if r.dry:
         lines += ["", "Dry run. Stopped after gating. Re-run without --dry to draft."]
     elif r.qualified:
         lines += ["", "Drafting is not built yet (prompts 3-4). Stopped after gating. "
@@ -86,7 +86,5 @@ def run_scan(mode: str, days: Optional[int] = None, dry: bool = False,
     the two states ("you asked to stop" vs "drafting isn't built") never read
     as the same thing.
     """
-    result = signal_pipeline.run(mode=mode, progress=progress, gate_cap=gate_cap,
-                                  recency_days=days)
-    result.dry = dry
-    return result
+    return signal_pipeline.run(mode=mode, progress=progress, gate_cap=gate_cap,
+                                recency_days=days, dry=dry)

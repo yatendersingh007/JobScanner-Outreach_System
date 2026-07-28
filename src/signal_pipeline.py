@@ -84,8 +84,9 @@ class FirmGroup:
 @dataclass
 class RunResult:
     run_id: int
+    mode: str = "manual"
     recency_days_used: int = 1
-    dry: bool = False  # set by src/run_scan.py; not touched by signal_pipeline itself
+    dry: bool = False
     postings_raw: int = 0
     postings_kept: int = 0
     groups: int = 0
@@ -351,13 +352,14 @@ def _resolve_recency_days(days: Optional[int]) -> int:
 # The run
 # ---------------------------------------------------------------------------
 def run(mode: str = "manual", progress: Progress = _noop,
-        gate_cap: Optional[int] = None, recency_days: Optional[int] = None) -> RunResult:
+        gate_cap: Optional[int] = None, recency_days: Optional[int] = None,
+        dry: bool = False) -> RunResult:
     cap = config.GATE_CAP_PER_RUN if gate_cap is None else gate_cap
     window = config.REGATE_WINDOW_DAYS
     days = _resolve_recency_days(recency_days)
 
     run_row = dbc.create_wd_run(mode, recency_days_used=days)
-    result = RunResult(run_id=run_row["id"], recency_days_used=days)
+    result = RunResult(run_id=run_row["id"], mode=mode, recency_days_used=days, dry=dry)
     if days > 1:
         progress(
             f"Window: last {days} days (catch-up). Postings older than {days} "
