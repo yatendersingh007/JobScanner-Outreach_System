@@ -128,16 +128,31 @@ def test_block4_argument_abstract_risk_fails():
 
 
 # ---------------------------------------------------------------------------
+# Block 6: the deck-attached claim must never diverge from the attachment
+# ---------------------------------------------------------------------------
+def test_block6_omits_deck_sentence_when_not_attached():
+    text = sd.block_6("https://boards.example/jobs/123", deck_attached=False)
+    assert "deck is attached" not in text.lower()
+    assert "https://boards.example/jobs/123" in text  # the URL line is unconditional
+
+
+def test_block6_includes_deck_sentence_when_attached():
+    text = sd.block_6("https://boards.example/jobs/123", deck_attached=True)
+    assert "The deck is attached." in text
+    assert "https://boards.example/jobs/123" in text
+
+
+# ---------------------------------------------------------------------------
 # Required facts
 # ---------------------------------------------------------------------------
 def test_required_facts_pass_when_assembled_correctly():
     b1 = sd.block_1("Jane", "Acme Capital", "Fund Controller", 1)
-    b6 = sd.block_6("https://boards.example/jobs/123")
+    b6 = sd.block_6("https://boards.example/jobs/123", deck_attached=False)
     corpus = sd.grounding_corpus({}, "Acme Capital", "Fund Controller",
                                  "https://boards.example/jobs/123", ["Fund Controller"], 1)
     v = sd.find_required_fact_violations(
         b1, b6, sd._BLOCK_3, "Fund Controller", "Acme Capital",
-        "https://boards.example/jobs/123", corpus)
+        "https://boards.example/jobs/123", corpus, deck_attached=False)
     assert v == []
 
 
@@ -146,14 +161,14 @@ def test_reworded_posting_title_fails_required_fact_check():
     corpus verbatim. A caller that reworded the title before calling block_1
     (e.g. paraphrased or re-cased it) is caught here, not shipped silently."""
     b1 = sd.block_1("Jane", "Acme Capital", "Senior Fund Controller", 1)
-    b6 = sd.block_6("https://boards.example/jobs/123")
+    b6 = sd.block_6("https://boards.example/jobs/123", deck_attached=False)
     # The corpus reflects the ACTUAL posting title, which differs from what
     # was used to build block_1 above -- simulating a reworded title.
     corpus = sd.grounding_corpus({}, "Acme Capital", "Fund Controller",
                                  "https://boards.example/jobs/123", ["Fund Controller"], 1)
     v = sd.find_required_fact_violations(
         b1, b6, sd._BLOCK_3, "Senior Fund Controller", "Acme Capital",
-        "https://boards.example/jobs/123", corpus)
+        "https://boards.example/jobs/123", corpus, deck_attached=False)
     assert "posting_title_not_grounded" in v
 
 
@@ -161,7 +176,7 @@ def test_missing_firm_name_in_block1_fails():
     b1 = sd.block_1("Jane", "Acme Capital", "Fund Controller", 1)
     v = sd.find_required_fact_violations(
         b1, "P.S. https://x.example", sd._BLOCK_3, "Fund Controller", "A Totally Different Firm",
-        "https://x.example", "corpus text")
+        "https://x.example", "corpus text", deck_attached=False)
     assert "missing_firm_name_in_block1" in v
 
 
@@ -169,15 +184,42 @@ def test_missing_posting_url_in_block6_fails():
     b1 = sd.block_1("Jane", "Acme Capital", "Fund Controller", 1)
     v = sd.find_required_fact_violations(
         b1, "P.S. wrong url", sd._BLOCK_3, "Fund Controller", "Acme Capital",
-        "https://boards.example/jobs/123", "corpus text with Fund Controller")
+        "https://boards.example/jobs/123", "corpus text with Fund Controller", deck_attached=False)
     assert "missing_posting_url_in_block6" in v
 
 
 def test_block3_dollar_ranges_required():
     v = sd.find_required_fact_violations(
         "block1 text", "block6 text", "A modified Block 3 with no dollar ranges.",
-        "Fund Controller", "Acme Capital", "https://x.example", "corpus")
+        "Fund Controller", "Acme Capital", "https://x.example", "corpus", deck_attached=False)
     assert "block3_modified" in v
+
+
+def test_deck_attachment_claim_mismatch_when_claimed_but_not_attached():
+    b6 = sd.block_6("https://x.example", deck_attached=True)  # claims attached
+    v = sd.find_required_fact_violations(
+        "block1 text with Fund Controller and Acme Capital", b6, sd._BLOCK_3,
+        "Fund Controller", "Acme Capital", "https://x.example",
+        "corpus with Fund Controller", deck_attached=False)  # but it isn't
+    assert "deck_attachment_claim_mismatch" in v
+
+
+def test_deck_attachment_claim_mismatch_when_attached_but_not_claimed():
+    b6 = sd.block_6("https://x.example", deck_attached=False)  # doesn't claim attached
+    v = sd.find_required_fact_violations(
+        "block1 text with Fund Controller and Acme Capital", b6, sd._BLOCK_3,
+        "Fund Controller", "Acme Capital", "https://x.example",
+        "corpus with Fund Controller", deck_attached=True)  # but it is
+    assert "deck_attachment_claim_mismatch" in v
+
+
+def test_deck_attachment_claim_matches_when_both_true():
+    b6 = sd.block_6("https://x.example", deck_attached=True)
+    v = sd.find_required_fact_violations(
+        "block1 text with Fund Controller and Acme Capital", b6, sd._BLOCK_3,
+        "Fund Controller", "Acme Capital", "https://x.example",
+        "corpus with Fund Controller", deck_attached=True)
+    assert "deck_attachment_claim_mismatch" not in v
 
 
 def test_corpus_contains_posting_url():
@@ -249,6 +291,48 @@ def test_manpreet_in_llm_response_fails_hard_never_retried(monkeypatch):
     assert b2_fb is True
     assert "manpreet" not in block2.lower()
     assert block2 == "A multifamily investment manager."  # fell back to the oneliner
+
+
+def test_hard_failure_in_one_block_and_soft_violation_in_other(monkeypatch):
+    """The real mixed case: Block 2 hard-fails (forbidden claim) while Block 4
+    independently has only a SOFT violation (missing role connection).
+    Block 2 must never be retried, and -- the bug found while tracing this
+    exact scenario -- must never be echoed into the retry prompt labeled
+    "already correct" context, since it isn't correct, it's forbidden
+    content already headed to fallback regardless of what the retry
+    produces. Block 4 still gets its own independent retry, requested
+    alone."""
+    monkeypatch.setattr(sd.config, "TEST_MODE", False)
+    calls = []
+
+    def fake_complete(prompt, **kwargs):
+        calls.append(prompt)
+        if len(calls) == 1:
+            return ({"block_2": "Manpreet suggested I reach out about your Fund Controller role.",
+                     "block_4": "Our operators run CAM true-ups and it costs you every close."},
+                    _Usage())
+        # The forbidden-list boilerplate always mentions "Manpreet" (every
+        # retry prompt warns against it); what must NOT appear is Block 2's
+        # actual hard-failed SENTENCE echoed back labeled as correct context.
+        assert "Manpreet suggested I reach out" not in prompt, \
+            "hard-failed Block 2 must not be echoed as context"
+        assert "Block 2 (already correct" not in prompt
+        assert '"block_2"' not in prompt, "Block 2 must not be re-requested"
+        return ({"block_4": "A fund controller search takes three months and the seat "
+                            "stays empty while you run it."},
+                _Usage())
+
+    monkeypatch.setattr(models_mod, "complete_json_retry", fake_complete)
+
+    block2, block4, b2_fb, b4_fb = sd._generate_blocks(
+        "Acme Capital", {"firm_oneliner": "A multifamily investment manager."},
+        "Fund Controller", "https://x.example", ["Fund Controller"], 1)
+
+    assert len(calls) == 2  # Block 4's independent soft retry still runs
+    assert b2_fb is True   # Block 2 fell back, hard failure, never retried
+    assert b4_fb is False  # Block 4's retry produced a clean result
+    assert block2 == "A multifamily investment manager."
+    assert "fund controller" in block4.lower()
 
 
 def test_soft_violation_gets_one_retry_then_ships_clean_result(monkeypatch):
@@ -333,6 +417,18 @@ def test_draft_email_full_assembly_prints_and_grounds_url():
     assert "https://boards.example/jobs/456" in content["body"]
     assert content["word_count"] <= sd.config.EMAIL_MAX_WORDS
     assert content["subject"] == "Your Fund Controller opening"
+    assert "deck is attached" not in content["body"].lower()  # deck_attached defaults False
+
+
+def test_draft_email_claims_deck_attached_only_when_told_to():
+    content = sd.draft_email(
+        firm_name="Acme Capital Partners", poc_first_name="Jane", poc_email="jane@acme.example",
+        posting_title="Fund Controller", posting_url="https://boards.example/jobs/456",
+        titles=["Fund Controller"], posting_count=1, firm_short_name="Acme Capital",
+        research={"firm_oneliner": "A multifamily investment manager active in the Southeast."},
+        deck_attached=True,
+    )
+    assert "The deck is attached." in content["body"]
 
 
 def test_draft_email_multi_posting_subject_and_block1():
@@ -417,6 +513,9 @@ def test_draft_for_run_stops_at_cancel_between_firms(monkeypatch):
 
 
 def test_draft_for_run_no_email_when_no_poc_hint(monkeypatch):
+    """apollo_enrich cannot search by title and company (confirmed gap, see
+    BUILD_LOG.md) -- with no scanner hint at all, the reason must say so
+    plainly, not read like the firm simply has no one to contact."""
     firms = [_firm(1, "Firm A")]
     postings = {1: [{"title": "Fund Controller", "url": "https://x.example", "poc_name_hint": None,
                      "poc_designation_hint": None}]}
@@ -426,9 +525,14 @@ def test_draft_for_run_no_email_when_no_poc_hint(monkeypatch):
 
     assert len(result.no_email) == 1
     assert result.drafted == []
+    reason = result.no_email[0]["no_email_reason"]
+    assert "no way yet to find who runs finance" in reason
+    assert "search-by-title-and-company is not implemented" in reason
 
 
 def test_draft_for_run_no_email_when_apollo_finds_nothing(monkeypatch):
+    """A distinct reason from the no-hint case: there WAS a candidate name,
+    Apollo just couldn't resolve an email for it."""
     firms = [_firm(1, "Firm A")]
     postings = {1: [_posting(poc="Poc A")]}
     _patch_common(monkeypatch, firms, postings, {})  # no email in the fixture map
@@ -436,6 +540,9 @@ def test_draft_for_run_no_email_when_apollo_finds_nothing(monkeypatch):
     result = sd.draft_for_run(run_id=1)
 
     assert len(result.no_email) == 1
+    reason = result.no_email[0]["no_email_reason"]
+    assert "Poc A" in reason
+    assert "could not resolve an email" in reason
 
 
 def test_draft_for_run_within_run_duplicate_blocks(monkeypatch):

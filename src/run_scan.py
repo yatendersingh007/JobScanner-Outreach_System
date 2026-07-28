@@ -109,7 +109,8 @@ def summarize(r, dry_hint: str = "--dry") -> str:
                       for f in r.drafted_with_prior_contact]
         if r.no_email:
             lines += [f"NO EMAIL FOUND {len(r.no_email)}"]
-            lines += [f"  {f['firm_name']}" for f in r.no_email]
+            lines += [f"  {f['firm_name']}: {f.get('no_email_reason', 'no email found')}"
+                      for f in r.no_email]
         if r.duplicate_within_run:
             lines += [f"DUPLICATE WITHIN RUN, blocked {len(r.duplicate_within_run)}"]
             lines += [f"  {f['firm_name']}" for f in r.duplicate_within_run]

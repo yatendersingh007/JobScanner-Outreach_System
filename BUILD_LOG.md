@@ -781,3 +781,164 @@ HARD RULE 1 holds.
 
 Not started: prompt 4 (deck), prompt 5 (preflight/budget enforcement),
 prompts 6-7.
+
+---
+
+## Prompt 3 follow-up - three fixes before prompt 4 - 2026-07-29
+
+**Fix 1: Block 6's "deck is attached" claim could diverge from reality.**
+`gmail_client.create_draft()` is always called with `attach_path=None` until
+Prompt 4 builds the deck, but `block_6()` asserted "The deck is attached."
+unconditionally -- every draft made under Prompt 3 contained a false factual
+claim, assembled in Python, in the one block this module treats as
+trustworthy by construction. Fixed: `block_6(posting_url, deck_attached)`
+now includes the sentence only when `deck_attached` is true; the posting URL
+line is unconditional either way.
+`find_required_fact_violations()` gained a `deck_attached` parameter and a
+new `deck_attachment_claim_mismatch` check (regex-detects "the deck is
+attached" in Block 6's text, compares against the passed-in flag, fails in
+EITHER direction of mismatch) so the claim and the attachment cannot diverge
+again silently. `draft_email()` gained a `deck_attached: bool = False`
+parameter threaded to both. `_draft_one_firm()` introduces one variable,
+`deck_pdf_path = None` (Prompt 4 sets this for real), and drives Block 6's
+wording, `gmail_client.create_draft()`'s `attach_path`, and the `wd_drafts`
+row's `deck_pdf_path`/`deck_attached` columns all from that single value --
+they were three independently-hardcoded `None`/`False` literals before this
+fix, which is exactly how they drifted apart in the first place. Tests:
++7 (`test_block6_omits/includes_deck_sentence_*`,
+`test_deck_attachment_claim_mismatch_*` x2, `test_deck_attachment_claim_matches_when_both_true`,
+`test_draft_email_claims_deck_attached_only_when_told_to`, and the mixed
+retry test below).
+
+**Fix 2: POC discovery cannot search by title -- confirmed, not assumed.**
+Printed `lib_snapshot/enrichment/apollo.py`'s full public surface (it's what
+`apollo_enrich.py` actually calls into): `healthcheck()` and
+`enrich_leads(leads, progress)`, neither used by Workflow D.
+`apollo_enrich.py`'s own full public surface is exactly one function:
+`find_email(poc_name, company_name, linkedin_url=None, domain=None,
+seed_email=None, progress=_noop) -> (email, confidence)`. Both wrap exactly
+one Apollo endpoint, `POST /api/v1/people/match` (`MATCH_URL` in
+`lib_snapshot/enrichment/apollo.py`), a single-PERSON match keyed on a name,
+email, or LinkedIn URL. There is no call anywhere in the vendored closure to
+Apollo's `people/search`/`mixed_people/search` endpoints, which are the
+actual capability "senior finance titles first, by title and company" would
+need (filter by `organization_domains` + `person_titles`, no name required).
+`bulk_match`'s own documented 403 (a DIFFERENT endpoint) doesn't confirm or
+rule out plan access to a search endpoint either way.
+**Answer: it cannot search by title and company. This is a real, confirmed
+gap**, not wired around blind here -- building an untested call against an
+Apollo endpoint this codebase has never exercised, on a plan that has
+already had one endpoint (`bulk_match`) rejected, is exactly the kind of
+unverified-in-the-failing-environment change HARD RULE 8 warns against.
+**Recorded as a known gap for Prompt 5** (or whenever Apollo plan access to
+a search endpoint is confirmed): Workflow D's POC discovery is permanently
+bottlenecked on the scanner's own `poc_name_hint` until then; there is no
+path to "the senior finance contact at this firm" when the scanner didn't
+happen to scrape a name.
+Fixed the dishonesty this produced in the meantime: the `no_email` bucket
+now carries a `no_email_reason` string distinguishing the two real failure
+modes -- "no POC name hint from the scanner, and Apollo search-by-title-
+and-company is not implemented (known gap, see BUILD_LOG.md) -- there is no
+way yet to find who runs finance at this firm" versus "Apollo could not
+resolve an email for `<name>` (scanner hint)" when a candidate name existed
+but Apollo failed on it. `run_scan.summarize()` prints the reason per firm
+instead of a bare firm name that read as "this firm has no contact." Tests:
++2 (`test_draft_for_run_no_email_when_no_poc_hint`/`..._apollo_finds_nothing`
+updated to assert the distinct reasons), summarize test updated.
+
+**Fix 3: `contacted_pocs` had no wd_ migration.** `wd_dbc.find_prior_contact`/
+`record_contacted` read and write it, but it was created by NO migration in
+this repo -- it only existed because Workflow A or C's own migrations had
+already run against the shared `outreach` database. A fresh database, or
+Workflow D migrated first, would fail at drafting time with a bare
+"relation contacted_pocs does not exist." Added
+`migrations/wd_003_contacted_pocs.sql`, `CREATE TABLE IF NOT EXISTS`
+column-for-column identical to referral-system's own
+`migrations/002_workflow_c.sql` (read directly to confirm, not assumed):
+
+```sql
+-- referral-system/migrations/002_workflow_c.sql (donor, lines 75-85)
+CREATE TABLE IF NOT EXISTS contacted_pocs (
+  id SERIAL PRIMARY KEY,
+  linkedin_url TEXT,
+  email TEXT,
+  poc_name TEXT,
+  firm_name TEXT,
+  source_workflow TEXT NOT NULL,  -- 'A' | 'C'
+  gmail_draft_id TEXT,
+  contacted_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS contacted_pocs_url_idx ON contacted_pocs (linkedin_url) WHERE linkedin_url IS NOT NULL;
+```
+
+```sql
+-- migrations/wd_003_contacted_pocs.sql (this fix)
+CREATE TABLE IF NOT EXISTS contacted_pocs (
+    id               SERIAL PRIMARY KEY,
+    linkedin_url     TEXT,
+    email            TEXT,
+    poc_name         TEXT,
+    firm_name        TEXT,
+    source_workflow  TEXT NOT NULL,  -- 'A' | 'C' | 'D'
+    gmail_draft_id   TEXT,
+    contacted_at     TIMESTAMPTZ DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS contacted_pocs_url_idx ON contacted_pocs (linkedin_url) WHERE linkedin_url IS NOT NULL;
+```
+
+Every column and type matches. The only difference is `source_workflow`'s
+inline comment (`'A' | 'C'` -> `'A' | 'C' | 'D'`, since Workflow D writes
+here now too) -- a comment, not a column definition. `shared_db.migrate()`
+discovers migrations via `sorted(mig_dir.glob("*.sql"))`, so
+`wd_003_contacted_pocs.sql` sorts after the existing `wd_001`/`wd_002` files
+correctly by filename alone.
+
+**The diff question, answered precisely.** Two edits happened in the same
+batch while fixing 2 failing tests, and they are unrelated to each other:
+
+1. `src/signal_drafting.py`'s `prior_contact_claim` regex: the gap between
+   "spoke" and "before/previously/earlier" widened from `{0,15}` to `{0,40}`
+   characters. This fixed a DIFFERENT failing case, "We spoke with your team
+   before about this." (the gap "with your team " is 16 characters, one over
+   the old ceiling) -- a forbidden-claims matrix gap, nothing to do with
+   retry logic.
+2. `tests/test_signal_drafting.py`'s `test_manpreet_in_llm_response_fails_hard_never_retried`
+   fixture: only the `block_4` TEXT changed, from a version that (unnoticed
+   at the time) carried its OWN independent soft violation
+   (`missing_role_connection` -- it never mentioned "fund" or "controller"
+   for a "Fund Controller" posting) to a clean one. **Retry behavior in
+   `signal_drafting.py` was NOT changed for this failure** -- the test
+   fixture was. What actually happened: Block 2 hard-failed (Manpreet) as
+   designed, but Block 4's independent soft violation ALSO triggered its own
+   retry call, which broke the test's blanket "never call `complete_json_retry`
+   a second time" assumption. That assumption was too strong: per-block
+   retry independence means a hard failure on one block does NOT suppress an
+   unrelated retry on the other. The fixture was corrected to isolate the
+   behavior actually under test (Block 2's hard failure never retries)
+   without a confound from Block 4's separate, also-correct soft retry.
+
+   **"Hard failure in Block 2 while Block 4 has a soft violation" is a real
+   case, and tracing it precisely to answer this question surfaced an actual
+   bug**, now fixed and covered by a new test
+   (`test_hard_failure_in_one_block_and_soft_violation_in_other`):
+   `_build_retry_prompt()` labeled ANY non-retried block "already correct --
+   keep as context," without distinguishing "not retried because it's
+   genuinely clean" from "not retried because it hard-failed and is going
+   straight to fallback regardless." A hard-failed Block 2 (e.g. containing
+   "Manpreet suggested...") was being echoed back into the LIVE retry prompt
+   sent to the LLM, mislabeled as correct, purely as context for rewriting
+   Block 4. The final OUTPUT was never wrong (a hard-failed block always
+   resolves to its fallback regardless of what's in the prompt), but the
+   PROMPT CONTENT was sloppy and unnecessary: forbidden content re-entering
+   a live LLM call framed as approved, for no reason (the retry isn't asking
+   for that block back). Fixed by adding `block2_hard`/`block4_hard`
+   parameters to `_build_retry_prompt()`; a hard-failed block is now omitted
+   from the "kept context" section entirely rather than mislabeled.
+
+Tests: 237 passed (delta +7: 2 Block 6 tests, 3 deck-attachment-claim-mismatch
+tests, 1 `draft_email` deck_attached test, 1 mixed hard+soft retry test; the
+2 `no_email` reason tests and the DDL/no_email_reason `summarize()` update
+replaced existing assertions in place rather than adding new tests). 0
+failures.
+
+Not started: prompt 4 (deck), still.

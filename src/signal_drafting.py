@@ -95,9 +95,16 @@ def block_1(poc_first_name: str, firm_short: str, posting_title: str, posting_co
     return f"{greeting}\n\n{signal}"
 
 
-def block_6(posting_url: str) -> str:
+def block_6(posting_url: str, deck_attached: bool) -> str:
+    """The P.S. always carries the posting URL (the honest correction path).
+    The "deck is attached" sentence is included ONLY when a deck genuinely
+    is -- Prompt 4's scope, not yet wired. Every draft made before then
+    would otherwise assert an attachment gmail_client.create_draft() was
+    never given, a false factual claim in the one block this module treats
+    as trustworthy by construction."""
+    deck_line = "The deck is attached. " if deck_attached else ""
     return ("Harp\nFounder, X Analyst\n\n"
-            f"P.S. The deck is attached. The posting is here if I have the wrong one: {posting_url}")
+            f"P.S. {deck_line}The posting is here if I have the wrong one: {posting_url}")
 
 
 _LEGAL_SUFFIX_DISPLAY_RE = re.compile(
@@ -163,9 +170,12 @@ def grounding_corpus(research: dict, firm_name: str, posting_title: str, posting
 # posting record -- e.g. a reworded title -- which is exactly the defect
 # this check exists to catch mechanically rather than trust by construction.
 # ---------------------------------------------------------------------------
+_DECK_ATTACHED_CLAIM_RE = re.compile(r"the deck is attached", re.IGNORECASE)
+
+
 def find_required_fact_violations(block1_text: str, block6_text: str, block3_text: str,
                                   posting_title: str, firm_short_name: str, posting_url: str,
-                                  corpus_text: str) -> list[str]:
+                                  corpus_text: str, deck_attached: bool) -> list[str]:
     v = []
     if not posting_title or posting_title not in block1_text:
         v.append("missing_posting_title_in_block1")
@@ -175,6 +185,10 @@ def find_required_fact_violations(block1_text: str, block6_text: str, block3_tex
         v.append("missing_firm_name_in_block1")
     if not posting_url or posting_url not in block6_text:
         v.append("missing_posting_url_in_block6")
+    # The claim and the attachment cannot diverge: Block 6 says a deck is
+    # attached exactly when one genuinely is, in either direction.
+    if bool(_DECK_ATTACHED_CLAIM_RE.search(block6_text)) != bool(deck_attached):
+        v.append("deck_attachment_claim_mismatch")
     if block3_text != _BLOCK_3:
         v.append("block3_modified")
     elif "$145K to $180K" not in block3_text or "$55K to $75K" not in block3_text:
@@ -579,14 +593,24 @@ def _classify_violations(block2: str, block4: str, research: dict, firm_name: st
 def _build_retry_prompt(firm_name: str, posting_title: str, research_json: str,
                         retry_block2: bool, retry_block4: bool,
                         block2: str, block4: str,
-                        block2_violations: list[str], block4_violations: list[str]) -> str:
+                        block2_violations: list[str], block4_violations: list[str],
+                        block2_hard: bool = False, block4_hard: bool = False) -> str:
+    """block2_hard/block4_hard distinguish "not being retried because it's
+    already clean" from "not being retried because it hard-failed and is
+    going straight to fallback regardless of what this retry produces" --
+    only the former is genuinely "already correct" context. A hard-failed
+    block (e.g. a forbidden Manpreet mention) must never be echoed back into
+    a live prompt labeled as correct: it isn't being asked for here, its
+    final value is already decided (the fallback), and there is no reason
+    for the model rewriting the OTHER block to see forbidden content framed
+    as approved."""
     targets = [name for name, requested in (("Block 2", retry_block2), ("Block 4", retry_block4)) if requested]
     retry_target = " and ".join(targets)
 
     kept_lines = []
-    if not retry_block2:
+    if not retry_block2 and not block2_hard:
         kept_lines.append(f'Block 2 (already correct -- keep as context, do not rewrite it): "{block2}"')
-    if not retry_block4:
+    if not retry_block4 and not block4_hard:
         kept_lines.append(f'Block 4 (already correct -- keep as context, do not rewrite it): "{block4}"')
     kept_context = ("\n".join(kept_lines) + "\n\n") if kept_lines else ""
 
@@ -673,7 +697,8 @@ def _generate_blocks(firm_name: str, research: dict, posting_title: str, posting
         return final_block2, final_block4, bool(b2v), bool(b4v)
 
     retry_prompt = _build_retry_prompt(firm_name, posting_title, research_json,
-                                       retry_block2, retry_block4, block2, block4, b2v, b4v)
+                                       retry_block2, retry_block4, block2, block4, b2v, b4v,
+                                       block2_hard=b2_hard, block4_hard=b4_hard)
     retry_parsed, _retry_usage = models.complete_json_retry(
         retry_prompt, temperature=0.6, max_tokens=400, debug_capture=_capture, reasoning_effort="minimal",
     )
@@ -706,17 +731,23 @@ def _generate_blocks(firm_name: str, research: dict, posting_title: str, posting
 
 def draft_email(firm_name: str, poc_first_name: str, poc_email: str, posting_title: str,
                 posting_url: str, titles: list[str], posting_count: int,
-                firm_short_name: str, research: dict, progress: Progress = _noop) -> dict:
+                firm_short_name: str, research: dict, deck_attached: bool = False,
+                progress: Progress = _noop) -> dict:
     """Entry point for one firm. Returns {subject, to, body,
-    thin_personalization, word_count, block_2, block_4}."""
+    thin_personalization, word_count, block_2, block_4}.
+
+    `deck_attached` must reflect whether the caller is ACTUALLY going to
+    attach a deck to the Gmail draft this content ends up in -- Block 6's
+    wording and this check both key off the same value the caller passes,
+    so the claim and the attachment can never diverge."""
     b1 = block_1(poc_first_name, firm_short_name, posting_title, posting_count)
     b3 = _BLOCK_3
     b5 = _BLOCK_5
-    b6 = block_6(posting_url)
+    b6 = block_6(posting_url, deck_attached)
     corpus_text = grounding_corpus(research, firm_name, posting_title, posting_url, titles, posting_count)
 
     req_violations = find_required_fact_violations(
-        b1, b6, b3, posting_title, firm_short_name, posting_url, corpus_text)
+        b1, b6, b3, posting_title, firm_short_name, posting_url, corpus_text, deck_attached)
     if req_violations:
         # Should be unreachable given Python assembly above -- this is the
         # defensive backstop for a caller passing drifted facts, per FIX 10's
@@ -773,18 +804,29 @@ def _draft_one_firm(firm: dict, contacted_this_run: set[str], progress: Progress
     posting_url = next((p["url"] for p in postings if p.get("url")), "")
     short_name = firm_short(firm_name)
 
+    # KNOWN GAP (Prompt 3, recorded in BUILD_LOG.md): apollo_enrich.find_email
+    # can only resolve an email for a person it's already given a name for --
+    # it wraps Apollo's single-person people/match endpoint, not a title+
+    # company search. There is no senior-finance-titles-first discovery path;
+    # the scanner's poc_name_hint is the only candidate name this can ever
+    # act on. When there's no hint, the honest statement is "we have no way
+    # to find who runs finance here yet", not "this firm has no contact".
     poc_name = next((p.get("poc_name_hint") for p in postings if p.get("poc_name_hint")), None)
     if not poc_name:
-        progress(f"{firm_name}: no POC name hint from the scanner. No email found.")
-        return "no_email", firm
+        reason = ("no POC name hint from the scanner, and Apollo search-by-title-and-"
+                  "company is not implemented (known gap, see BUILD_LOG.md) -- there is "
+                  "no way yet to find who runs finance at this firm")
+        progress(f"{firm_name}: {reason}.")
+        return "no_email", {**firm, "no_email_reason": reason}
 
     email, confidence = apollo_enrich.find_email(
         poc_name=poc_name, company_name=firm_name, domain=(research.get("domain") or None),
         progress=progress,
     )
     if not email:
-        progress(f"{firm_name}: Apollo could not find an email for {poc_name}.")
-        return "no_email", firm
+        reason = f"Apollo could not resolve an email for {poc_name} (scanner hint)"
+        progress(f"{firm_name}: {reason}.")
+        return "no_email", {**firm, "no_email_reason": reason}
 
     norm_email = email.strip().lower()
     if norm_email in contacted_this_run:
@@ -800,17 +842,21 @@ def _draft_one_firm(firm: dict, contacted_this_run: set[str], progress: Progress
                           f"{prior_contact_at}, check sent mail before sending.")
         progress(f"{firm_name}: {poc_name} {collision_note}")
 
+    # Prompt 4's scope: no deck is generated yet. Single source of truth --
+    # this one variable drives Block 6's wording, the Gmail attachment, and
+    # the wd_drafts row, so they cannot drift apart from each other again.
+    deck_pdf_path = None
     poc_first_name = poc_name.split()[0] if poc_name else "there"
     email_content = draft_email(
         firm_name=firm_name, poc_first_name=poc_first_name, poc_email=email,
         posting_title=posting_title, posting_url=posting_url, titles=titles,
         posting_count=posting_count, firm_short_name=short_name, research=research,
-        progress=progress,
+        deck_attached=bool(deck_pdf_path), progress=progress,
     )
 
     gmail_result = gmail_client.create_draft(
         to=email, subject=email_content["subject"], body=email_content["body"],
-        attach_path=None, progress=progress,
+        attach_path=deck_pdf_path, progress=progress,
     )
 
     poc_title = next((p.get("poc_designation_hint") for p in postings if p.get("poc_designation_hint")), None)
@@ -823,7 +869,7 @@ def _draft_one_firm(firm: dict, contacted_this_run: set[str], progress: Progress
         word_count=email_content["word_count"],
         thin_personalization=email_content["thin_personalization"],
         gmail_draft_id=gmail_result["draft_id"],
-        deck_pdf_path=None, deck_attached=False,
+        deck_pdf_path=deck_pdf_path, deck_attached=bool(deck_pdf_path),
         collision_note=collision_note,
         prior_contact_workflow=prior_contact_workflow,
         prior_contact_at=prior_contact_at,

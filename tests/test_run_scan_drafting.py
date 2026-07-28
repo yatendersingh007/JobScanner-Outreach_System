@@ -119,7 +119,8 @@ def test_summarize_reports_drafted_and_fallback_counts():
         {"poc_name": "Sam Lee", "poc_email": "sam@x.example",
          "collision_note": "previously drafted via Workflow C on 2026-01-01, check sent mail."},
     ]
-    result.no_email = [{"firm_name": "No Email Co"}]
+    result.no_email = [{"firm_name": "No Email Co",
+                       "no_email_reason": "no way yet to find who runs finance at this firm"}]
     result.duplicate_within_run = [{"firm_name": "Dup Co"}]
     result.fallback_counts = {"forbidden_claim:manpreet_mention": 1}
 
@@ -130,7 +131,7 @@ def test_summarize_reports_drafted_and_fallback_counts():
     assert "DRAFTED, PRIOR CONTACT" in text
     assert "previously drafted via Workflow C" in text
     assert "NO EMAIL FOUND 1" in text
-    assert "No Email Co" in text
+    assert "No Email Co: no way yet to find who runs finance at this firm" in text
     assert "DUPLICATE WITHIN RUN" in text
     assert "Dup Co" in text
     assert "forbidden_claim:manpreet_mention=1" in text
