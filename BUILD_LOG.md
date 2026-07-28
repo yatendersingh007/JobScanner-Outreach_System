@@ -552,3 +552,232 @@ mock the lock rather than hit real Postgres; +8 in the new
 tests/test_run_lock.py; +2 in test_bot_dispatch.py). 0 failures.
 
 Not started: prompt 3, per instruction to stop here.
+
+---
+
+## Prompt 3 - the signal email - 2026-07-29
+
+**Diagnose recap** (full report given and approved before building): kept
+`find_missing_required_facts` (adapted), `find_missing_temporal_framing`
+(unchanged), `find_redundant_claims` (unchanged), the generic style checks
+(em dash/semicolon/curly quotes/question mark, banned words/phrases), the
+trim-whole-trailing-sentences length guard, and the generate -> validate ->
+retry -> fallback architecture with per-block attribution. Dropped
+`_MANPREET_ATTRIBUTION_RE` (too narrow for this template's real risk
+surface) and `find_missing_block4_argument`'s referral-specific keyword
+sets (wrong pitch content). New: a broadened forbidden-claims check, a
+"not just X, it's Y" style check, a posting-title-aware Block 4 argument
+check, and a HARD (never-retried) tier for forbidden claims AND ungrounded
+numeric claims -- PROMPTS.md's own item 4 lists "any figure not in the
+corpus" under forbidden claims, not under retry-eligible checks, so an
+ungrounded number gets the same no-retry treatment as a fabricated referral.
+
+Built: `src/signal_drafting.py` (new), `src/wd_dbc.py` (+`find_prior_contact`,
++`record_contacted`), `src/signal_pipeline.py` (RunResult gains
+`drafted`/`drafted_with_prior_contact`/`no_email`/`duplicate_within_run`/
+`fallback_counts`, additive only), `src/run_scan.py` (`_run_drafting()` glue,
+`summarize()` reports the new buckets and the fallback-telemetry line),
+`src/bot.py` (removed the now-stale "drafting is not built yet" messaging
+in three places). Tests: `tests/test_signal_drafting.py` (new, 53),
+`tests/test_run_scan_drafting.py` (new, 6), 4 new tests in
+`tests/test_wd_dbc.py` for `find_prior_contact`/`record_contacted`, and
+`tests/test_bot_dispatch.py` updated (3 tests testing bot.py's OWN
+construction of the draft-intent message removed -- that message now lives
+in `run_scan._run_drafting()`, unreachable through bot.py's own tests since
+they mock `run_scan` wholesale; 1 test renamed and rewritten to check the
+real new behavior instead of the old "not built yet" message).
+
+**Decisions made** (mine, not in PROMPTS.md or templates/signal_email.md):
+
+1. **`find_missing_required_facts` conditioning is my decision, not a
+   template rule.** Kept the check (FIX 10's failure mode -- a run shipping
+   with a known disclosed figure silently dropped -- is workflow-independent,
+   and `signal_email.md` is Harp's spec for voice and content, not an
+   enumeration of every mechanical guard, so adding a mechanical check here
+   doesn't override him). Conditioned it to fire ONLY when
+   `research.disclosed_figure` is actually non-empty: an AUM_ESTIMATED firm
+   with a units proxy has no dollar figure, and the template explicitly says
+   invent none, so demanding one would force exactly the fabrication this
+   check exists to prevent. Also dropped referral's `aum_display` fallback
+   entirely (referral's version checks `disclosed_figure or aum_display`) --
+   `icp_gate.py`'s own research-dict comment marks `aum_display`
+   "legacy/operator-view-only," superseded by `disclosed_figure`/
+   `disclosed_label`; carrying the deprecated fallback forward here would
+   have been copying a warning the donor already flagged as obsolete.
+2. **Forbidden-claims regex set**, adversarially tested against a matrix
+   below the specified matrix, plus one my own regex needed a second look
+   over: "introduction" is the one pattern that's genuinely ambiguous
+   (referral-flavored "an introduction" vs. sales-pitch "introduction to our
+   model," a legitimate phrase the near-miss list explicitly requires NOT to
+   fire). Solved with a narrow negative lookahead that excludes only
+   "introduction to our/my <company-facing noun>" (model/service/approach/
+   offering/process/program/platform/way/solution) -- everything else
+   involving "introduc*" still fires, deliberately asymmetric: a false
+   positive here costs one unnecessary fallback, a false negative ships a
+   fabricated referral claim.
+3. **Ungrounded numeric claims are HARD, not soft**, per PROMPTS.md's own
+   item 4 categorization (see diagnose recap above) -- a fabricated dollar
+   figure about a firm never gets a retry, straight to fallback, same tier
+   as a fabricated referral.
+4. **Block 4's argument check is entirely new** (referral's own regexes were
+   about ITS pitch, not this one): role-connection strips generic
+   seniority/corporate words from the posting title (senior/junior/staff/
+   lead/etc.) and requires at least one remaining DISTINCTIVE word to appear
+   in Block 4, so a CAM analyst opening cannot pass a paragraph written about
+   a fund controller. Concrete-cost is a positive-signal regex (nights,
+   empty seat, "close does not pause," backlog, "every close," etc.) --
+   Block 4 has to name a real cost, not use consultant-speak like "risks
+   disrupting reporting" (the template's own bad example).
+5. **`_fallback_blocks`'s ultimate fallback is an honest blank, not a
+   fabricated line.** Referral's own last-resort Block 2 fallback ("Your
+   firm came up in Manpreet's network...") is exactly the forbidden content
+   this module's own hard-fail check exists to block -- reusing it would
+   have fabricated the single most checkable claim in the email. If
+   `firm_oneliner` is itself empty, Block 2 becomes `""` and `draft_email`
+   omits it from the assembled body entirely (never a generic filler
+   sentence -- the template's own self-check: "could you swap in any firm
+   name and it still reads? If yes, Block 2 is filler").
+6. **All fixed blocks (1, 3, 5, 6) are hardcoded Python string literals**,
+   not parsed from `templates/signal_email.md` the way referral's simpler
+   `_parse_fixed_blocks` parses ITS fixed blocks. This template's Block 1 and
+   Block 3 sections each carry trailing developer-facing prose in the same
+   section ("This block is assembled in Python...", "This is the deck's own
+   pre-approved language...") that a generic header-to-next-header parser
+   would have to know to strip; getting that wrong ships commentary as email
+   text. A stale hardcoded literal is wrong on read; a bad parse is wrong at
+   runtime. A template wording edit now requires updating these literals to
+   match -- accepted tradeoff, documented here so it isn't a silent trap.
+7. **`draft_for_run` does real POC lookup and real Gmail draft creation**,
+   which PROMPTS.md's prompt 3 text doesn't spell out beyond "writes
+   wd_drafts rows" -- there is no dedicated POC-lookup or Gmail-wiring prompt
+   anywhere in PROMPTS.md's 0-7 list, and a `wd_drafts` row is not a draft
+   without a real recipient and a real Gmail draft id, so this had to land
+   somewhere. POC discovery uses the scanner's own `poc_name_hint` (a name
+   hint only, never an email source per CLAUDE.md's landmine) as the
+   candidate name fed into the already-vendored `apollo_enrich.find_email` --
+   NOT a new from-scratch Apollo org-title search, which the vendored
+   closure has no capability for. A firm with no `poc_name_hint` on any of
+   its postings, or one Apollo can't resolve, parks in the `no_email`
+   bucket; nothing is written to `wd_drafts` for it.
+8. **The deck is not attached in this prompt.** `deck_pdf_path`/
+   `deck_attached` are written `None`/`False` on every `wd_drafts` row --
+   deck generation is explicitly Prompt 4's scope (`lib_referral/
+   deck_filler.py` is untouched here).
+9. **Cross-workflow dedup**: added `find_prior_contact`/`record_contacted`
+   to `wd_dbc.py`, mirroring `referral-system/src/dbc.py`'s identical logic
+   against the SAME shared `contacted_pocs` table (created by
+   referral-system's own migrations, not ours -- `wd_001_tables.sql`'s own
+   header comment already said this table would be shared). `dbc.py` itself
+   isn't vendored, so the SQL is duplicated rather than imported. Within-run
+   blocking (HARD RULE 3's OTHER half) needed no new table or function at
+   all: `draft_for_run` keeps an in-memory set of normalized emails
+   contacted so far in the current run and checks it BEFORE ever calling
+   `find_prior_contact`, so a hit from the shared table is guaranteed to be
+   a genuinely prior (pre-this-run) contact -- advisory, drafts anyway,
+   `collision_note`/`prior_contact_workflow` set. A same-run repeat blocks
+   outright, no draft, `duplicate_within_run` bucket.
+10. **Fallback-count reset moved into `draft_for_run`**, per the explicit
+    instruction: `reset_fallback_counts()` runs at the top of every
+    `draft_for_run` call (a run boundary), and the aggregate is returned on
+    `DraftBatchResult.fallback_counts`, which `run_scan.py` folds onto
+    `RunResult` and `summarize()` prints as its own line -- the wiring
+    referral-system's own `reset_fallback_counts()` docstring admits nobody
+    ever added for it.
+11. **The spend/draft-intent message (Prompt 2 step 2a) moved from `bot.py`
+    into `run_scan._run_drafting()`.** It has to fire between gating and
+    drafting, in that order, and drafting is now inside the same
+    `run_scan()`/`run_single_firm()`/`run_resume()` call that used to just
+    gate -- by the time `bot.py` saw the returned result, drafting would
+    already be done. `_run_drafting` calls `tg.send()` directly (not
+    `progress()`, which would just flash and be overwritten by the first
+    "Drafting X..." line) -- safe for the CLI path too, since `tg.send()`
+    already no-ops to a log line with no bot token/chat configured.
+12. **`firm_short()` is mechanical** (strips a trailing legal suffix,
+    preserves display casing), not LLM-derived as the template's own comment
+    describes it -- Workflow D has no separate personalization-research
+    phase to derive it from. Same reasoning for skipping `personalization.py`
+    entirely: the generation prompt states the offering and role-mapping
+    instructions directly instead of depending on a `service_fit` field no
+    phase in Workflow D currently populates.
+
+**Adversarial test matrix** (forbidden claims, printed and verified before
+writing `tests/test_signal_drafting.py`):
+
+Must fire -- all 10 hit: "Manpreet suggested" (`manpreet_mention`), "Manpreet
+Singh mentioned" (`manpreet_mention`), "our mutual connection"
+(`mutual_connection`), "we were connected through" (`connected_origin_claim`),
+"you came up in our network" (`network_origin_claim`), "a colleague
+recommended" (`colleague_attribution`), "I was referred to you"
+(`referral_word`), "someone in your network" (`network_origin_claim`), "M.
+Singh" (`m_singh_obfuscation`), "Singh Capital" (`singh_capital`).
+
+Must NOT fire -- all 6 clean: "your network of properties", "a connected
+portfolio", "introduction to our model", "your network of Yardi entities",
+"the introduction to our process", "a connected set of multifamily assets".
+
+"Not just X, it's Y" variants -- all fire: "not just X but Y", "not merely
+X, it's Y", "isn't just X, it's Y", canonical "not just X, it's Y". Clean
+misses -- none fire: "not just accountants" (sentence ends, no "it's/but"
+continuation), "not just about month-end close", "not just bookkeepers by
+trade".
+
+Block 4 role-connection -- a CAM-analyst-shaped paragraph passes for "CAM
+Analyst" and fails for "Fund Controller"; a fund-controller-shaped paragraph
+passes for "Fund Controller" and fails for "CAM Analyst" -- all 4 combinations
+verified.
+
+**Sample generated email** (crafted block_2/block_4 standing in for a clean
+LLM first-pass response, to show the assembled output -- `thin_personalization:
+False`, no fallback triggered):
+
+```
+SUBJECT: Your Property Accountant opening
+TO:      alex@meridianrealty.example
+
+Hi Alex,
+
+You have a Property Accountant open at Meridian Realty. I run X Analyst. We are the alternative to that hire.
+
+You run about $340M in multifamily assets across Texas and Oklahoma, financed through a mix of LP equity and bank debt.
+
+A US fully loaded hire for that seat runs $145K to $180K. We place a dedicated senior operator on your team for $55K to $75K, exclusively yours, embedded in your systems and your close calendar, live in 10 days.
+
+A property accountant search takes three months and the close does not pause while you run it. Our operators already handle bank reconciliations and CAM true-ups in Yardi on day 10, and the seat stays empty until then.
+
+Can we do a call next week? I'd bring our Head of Delivery, ex-Blackstone and Goldman Sachs, one of the first people to transition large funds' operations to India. Thirty minutes with him is useful even if we never work together.
+
+Harp
+Founder, X Analyst
+
+P.S. The deck is attached. The posting is here if I have the wrong one: https://boards.greenhouse.io/meridianrealty/jobs/5581234
+```
+word_count=181, well under EMAIL_MAX_WORDS=260.
+
+**Deviations from the prompt, and why**: extended `draft_for_run` beyond the
+letter of PROMPTS.md's item 7 to include real POC lookup and real Gmail
+draft creation (see decision 7 above) -- necessary for `draft_for_run` to
+produce an actual draft rather than an email-content dict with nowhere to
+go, and there's no other prompt in the 0-7 list where this wiring belongs.
+
+**Open for next session**: Prompt 4 (deck) -- `deck_pdf_path`/`deck_attached`
+stay null/false until then. The template's `research_object` documentation
+mentions an `asset_class` field that does not actually exist anywhere in
+`icp_gate.py`'s research dict (checked directly, not assumed) -- not fixed
+here since `templates/signal_email.md`'s text is DO-NOT-CHANGE; the
+generation prompt works from the fields that do exist (geography,
+capital_stack, disclosed_figure, founded_year, firm_oneliner). `firm_short()`
+being mechanical rather than LLM-derived is worth revisiting if real display
+names look wrong in practice (e.g. a firm name with an unusual legal form
+this regex doesn't recognize).
+
+Tests: 230 passed (delta +60: +53 `tests/test_signal_drafting.py`, +6
+`tests/test_run_scan_drafting.py`, +4 `tests/test_wd_dbc.py` (`contacted_pocs`),
+net -3 in `tests/test_bot_dispatch.py` (3 tests removed, testing behavior
+that moved to `run_scan.py`; 1 renamed and rewritten in place)). 0 failures.
+`grep -rn "\.send("` re-verified against `src/` and `lib_referral/`: the only
+hits are Telegram's own `tg.send()`/`wd_telegram.send()` and
+`gmail_client.py`'s own comments about NOT having a `.send()` method --
+HARD RULE 1 holds.
+
+Not started: prompt 4 (deck), prompt 5 (preflight/budget enforcement),
+prompts 6-7.

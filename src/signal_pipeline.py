@@ -109,6 +109,16 @@ class RunResult:
     # it rather than each recomputing their own copy of the same arithmetic.
     drafts_planned: int = 0
     drafts_over_cap: int = 0
+    # Set by run_scan.py's drafting step (Prompt 3), never by run() itself --
+    # this module stops at a persisted verdict (module docstring above).
+    # wd_drafts rows / wd_firms rows, per HARD RULE 3's own bucket split.
+    drafted: list = field(default_factory=list)
+    drafted_with_prior_contact: list = field(default_factory=list)
+    no_email: list = field(default_factory=list)
+    duplicate_within_run: list = field(default_factory=list)
+    # HARD RULE 4: per-run aggregate fact-grounding/fallback counts, reset at
+    # the start of every draft_for_run() call and reported here.
+    fallback_counts: dict = field(default_factory=dict)
 
 
 _WS_RE = re.compile(r"\s+")

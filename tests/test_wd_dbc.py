@@ -333,3 +333,78 @@ def test_reconcile_acquires_and_releases_around_a_real_update(monkeypatch):
     assert pool.held is False  # released again afterward
     assert wd_dbc._run_lock_conn is None
     assert pool.checked_out == []
+
+
+# ---------------------------------------------------------------------------
+# find_prior_contact() / record_contacted() (Prompt 3, HARD RULE 3): the
+# shared contacted_pocs table itself is created by referral-system's own
+# migrations (see migrations/wd_001_tables.sql's header comment), not ours --
+# these two functions just read/write it directly, mirroring
+# referral-system/src/dbc.py's identical logic exactly (that file isn't
+# vendored, so the SQL is duplicated, not imported).
+# ---------------------------------------------------------------------------
+class _FakeContactedPocsCursor:
+    def __init__(self, rows):
+        self._rows = rows
+        self.executed: list[tuple] = []
+        self._result = None
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+        if "linkedin_url IS NOT NULL" in sql:
+            self._result = next((r for r in self._rows if r.get("linkedin_url")), None)
+        elif "lower(email)" in sql:
+            target = (params[0] or "").lower()
+            self._result = next((r for r in self._rows if (r.get("email") or "").lower() == target), None)
+        else:
+            self._result = None
+
+    def fetchone(self):
+        return self._result
+
+
+def test_find_prior_contact_tries_linkedin_url_before_email(monkeypatch):
+    rows = [{"linkedin_url": "https://linkedin.com/in/jane", "email": "jane@x.example",
+            "source_workflow": "C"}]
+    cur = _FakeContactedPocsCursor(rows)
+    monkeypatch.setattr(wd_dbc, "cursor", lambda: _fake_cursor_wrap(cur))
+
+    result = wd_dbc.find_prior_contact("https://linkedin.com/in/jane", "jane@x.example")
+
+    assert result["source_workflow"] == "C"
+    assert "linkedin_url IS NOT NULL" in cur.executed[0][0]
+
+
+def test_find_prior_contact_falls_back_to_email_when_no_linkedin_url(monkeypatch):
+    rows = [{"linkedin_url": None, "email": "jane@x.example", "source_workflow": "A"}]
+    cur = _FakeContactedPocsCursor(rows)
+    monkeypatch.setattr(wd_dbc, "cursor", lambda: _fake_cursor_wrap(cur))
+
+    result = wd_dbc.find_prior_contact(None, "jane@x.example")
+
+    assert result["source_workflow"] == "A"
+
+
+def test_find_prior_contact_returns_none_when_nothing_matches(monkeypatch):
+    cur = _FakeContactedPocsCursor([])
+    monkeypatch.setattr(wd_dbc, "cursor", lambda: _fake_cursor_wrap(cur))
+
+    assert wd_dbc.find_prior_contact(None, "nobody@x.example") is None
+
+
+def test_record_contacted_inserts_with_on_conflict_upsert(monkeypatch):
+    cur = _FakeUpdateCursor(matching_ids=[])
+    fake_conn = _FakeUpdateConn(cur)
+    monkeypatch.setattr(wd_dbc, "conn", lambda: _wrap(fake_conn))
+
+    wd_dbc.record_contacted(linkedin_url=None, email="jane@x.example", poc_name="Jane Doe",
+                            firm_name="Acme Capital", gmail_draft_id="D1", source_workflow="D")
+
+    assert "INSERT INTO contacted_pocs" in cur.executed_sql
+    assert "ON CONFLICT (linkedin_url)" in cur.executed_sql
+    assert fake_conn.committed is True
+
+
+@contextmanager
+def _fake_cursor_wrap(cur):
+    yield cur

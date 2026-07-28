@@ -15,10 +15,39 @@ import logging
 from types import SimpleNamespace
 from typing import Optional
 
-from . import signal_pipeline, wd_config as config
+from . import signal_drafting, signal_pipeline, wd_config as config
 from . import wd_telegram as tg
 
 log = logging.getLogger("workflow-d.run_scan")
+
+
+def _run_drafting(result, progress) -> None:
+    """Prompt 3: drafting runs INLINE, right after gating, in the same call
+    that gated -- not a second command (PROMPTS.md prompt 3 item 7). Posts
+    the spend/draft intent as its own persistent Telegram message via
+    tg.send() (Prompt 2 step 2a: "information, not a question"), distinct
+    from progress()'s rate-limited live-edited status line -- a message
+    sent via progress() would just flash and get overwritten by the first
+    "Drafting X..." line. tg.send() no-ops to a log line when no bot
+    token/chat is configured, so this is also safe to call from the CLI.
+    """
+    if not result.qualified:
+        return
+    over_note = (f", {result.drafts_over_cap} over cap and parked for /resume"
+                if result.drafts_over_cap else "")
+    tg.send(
+        f"{len(result.qualified)} qualified. {result.drafts_planned} will be drafted "
+        f"(DRAFT_CAP_PER_RUN={config.DRAFT_CAP_PER_RUN}){over_note}. "
+        "/cancel now if this number looks wrong."
+    )
+    draft_result = signal_drafting.draft_for_run(result.run_id, progress)
+    result.drafted = draft_result.drafted
+    result.drafted_with_prior_contact = draft_result.drafted_with_prior_contact
+    result.no_email = draft_result.no_email
+    result.duplicate_within_run = draft_result.duplicate_within_run
+    result.fallback_counts = draft_result.fallback_counts
+    if draft_result.cancelled:
+        result.cancelled = True
 
 
 def summarize(r, dry_hint: str = "--dry") -> str:
@@ -64,34 +93,54 @@ def summarize(r, dry_hint: str = "--dry") -> str:
         lines += ["", "CONNECTOR HEALTH: zero results from "
                       + ", ".join(r.connector_health)
                       + ". Check the target page markup."]
+    if r.dry:
+        lines += ["", f"Dry run. Stopped after gating. Re-run without {dry_hint} to draft."]
+    elif r.qualified:
+        lines += [
+            "",
+            f"DRAFTED {len(r.drafted)}",
+        ]
+        lines += [f"  {f['poc_name']} <{f['poc_email']}>, gmail draft {f.get('gmail_draft_id')}"
+                  for f in r.drafted]
+        if r.drafted_with_prior_contact:
+            lines += [f"DRAFTED, PRIOR CONTACT (advisory, check before sending) "
+                      f"{len(r.drafted_with_prior_contact)}"]
+            lines += [f"  {f['poc_name']} <{f['poc_email']}>: {f.get('collision_note')}"
+                      for f in r.drafted_with_prior_contact]
+        if r.no_email:
+            lines += [f"NO EMAIL FOUND {len(r.no_email)}"]
+            lines += [f"  {f['firm_name']}" for f in r.no_email]
+        if r.duplicate_within_run:
+            lines += [f"DUPLICATE WITHIN RUN, blocked {len(r.duplicate_within_run)}"]
+            lines += [f"  {f['firm_name']}" for f in r.duplicate_within_run]
+        if r.fallback_counts:
+            lines += ["", "Fallback telemetry (HARD RULE 4): " +
+                      ", ".join(f"{reason}={count}" for reason, count in sorted(r.fallback_counts.items()))]
+
     lines += [
         "",
         f"Spend: {r.tavily_searches} Tavily searches, {r.llm_tokens} LLM tokens, "
         f"${r.research_cost_usd:.2f} research",
         f"CSV: {r.csv_path}",
     ]
-
-    if r.dry:
-        lines += ["", f"Dry run. Stopped after gating. Re-run without {dry_hint} to draft."]
-    elif r.qualified:
-        lines += ["", "Drafting is not built yet (prompts 3-4). Stopped after gating. "
-                      f"Use {dry_hint} to suppress this note."]
     return "\n".join(lines)
 
 
 def run_scan(mode: str, days: Optional[int] = None, dry: bool = False,
              gate_cap: Optional[int] = None, progress=tg.progress):
-    """Scan, gate, and (once prompts 3-4 land) draft. Returns the RunResult.
+    """Scan, gate, and (unless `dry`) draft. Returns the RunResult.
 
-    Never drafts today: signal_drafting.py does not exist yet. Gating always
-    completes and persists regardless of `dry` — dry only controls whether a
-    caller WOULD go on to draft, which right now is moot either way. The
-    distinction is kept in the signature and in `summarize()`'s messaging so
-    the two states ("you asked to stop" vs "drafting isn't built") never read
-    as the same thing.
+    Gating always completes and persists regardless of `dry`. Drafting runs
+    INLINE right after, in this same call, unless `dry` -- there is no
+    separate pursue command (Prompt 1's design) and no confirm gate
+    (Prompt 2 step 2a): the spend/draft intent is posted as information, not
+    a question, and the run continues.
     """
-    return signal_pipeline.run(mode=mode, progress=progress, gate_cap=gate_cap,
-                                recency_days=days, dry=dry)
+    result = signal_pipeline.run(mode=mode, progress=progress, gate_cap=gate_cap,
+                                 recency_days=days, dry=dry)
+    if not dry and not result.cancelled:
+        _run_drafting(result, progress)
+    return result
 
 
 def run_single_firm(mode: str, firm_name: str, dry: bool = False,
@@ -136,6 +185,8 @@ def run_single_firm(mode: str, firm_name: str, dry: bool = False,
             llm_tokens=result.llm_tokens,
             research_cost_usd=result.research_cost_usd,
         )
+        if not dry:
+            _run_drafting(result, progress)
         return result
     finally:
         dbc.release_run_lock()
@@ -212,6 +263,8 @@ def run_resume(dry: bool = False, progress=tg.progress):
             llm_tokens=result.llm_tokens,
             research_cost_usd=result.research_cost_usd,
         )
+        if not dry and not result.cancelled:
+            _run_drafting(result, progress)
         return result
     finally:
         dbc.release_run_lock()

@@ -201,22 +201,10 @@ def _run_scan_job(parsed: dict) -> None:
             tg.send(f"Workflow D run CRASHED: {type(e).__name__}: {e}")
             return
 
-        # Prompt 2 step 2a: post the draft/spend INTENT right after gating,
-        # before any attempt to draft. Information, not a question -- there
-        # is no confirm gate. /cancel is there if the number looks wrong;
-        # DRAFT_CAP_PER_RUN stops it regardless. The arithmetic itself
-        # (drafts_planned/drafts_over_cap) is computed by the pipeline, not
-        # here -- bot.py only reads and formats it.
-        if not dry and result.qualified:
-            over_note = (f", {result.drafts_over_cap} over cap and parked for /resume"
-                        if result.drafts_over_cap else "")
-            tg.send(
-                f"{len(result.qualified)} qualified. {result.drafts_planned} would be drafted "
-                f"(DRAFT_CAP_PER_RUN={config.DRAFT_CAP_PER_RUN}){over_note}. "
-                "Drafting is not built yet (prompts 3-4), so this run stops after "
-                "gating. /cancel would have stopped it here if this number looked wrong."
-            )
-
+        # Prompt 2 step 2a's spend/draft intent message and prompt 3's actual
+        # drafting both happen INSIDE run_scan()/run_single_firm() now (Prompt
+        # 3: run_scan._run_drafting), right after gating and before drafting
+        # starts -- not here. bot.py only formats the final result.
         tg.finish("cancelled" if result.cancelled else "done")
         tg.send(summarize(result, dry_hint="/scan dry"))
     finally:
@@ -316,7 +304,7 @@ def _handle_qualify(arg: str) -> None:
     )
     tg.send(
         f'Qualified "{row["firm_name"]}" at {human_usd(aum)}. '
-        "Drafting is not built yet (prompts 3-4); nothing else happens automatically."
+        "Nothing else happens automatically -- /resume drafts it on the next run."
     )
 
 
@@ -369,8 +357,7 @@ def _handle_status() -> None:
 def _help_text() -> str:
     return (
         "Workflow D bot.\n\n"
-        "/scan                  - full run: scan, gate, draft. Drafting is not "
-        "built yet, so this stops after gating for now.\n"
+        "/scan                  - full run: scan, gate, draft, Gmail drafts.\n"
         "/scan dry              - stop after gating. No Apollo calls, no drafts. "
         "The opt-out, not the default.\n"
         f"/scan days N           - catch-up window after a gap (1-{config.MAX_SCAN_DAYS}).\n"

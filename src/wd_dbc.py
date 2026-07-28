@@ -442,6 +442,73 @@ def draft_exists_for_firm(firm_id: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# contacted_pocs (cross-workflow dedup, HARD RULE 3). Shared infrastructure:
+# the table itself is created by referral-system's migrations, not ours (see
+# migrations/wd_001_tables.sql's own header comment) -- Workflow D reads and
+# writes it directly here because referral-system's src/dbc.py, which
+# already has this exact logic, is not vendored (only specific lib_referral
+# files are; dbc.py isn't one of them). Same matching logic as referral's
+# find_prior_contact/record_contacted: normalized LinkedIn URL first, email
+# fallback, so a formatting difference (trailing slash, http vs https)
+# doesn't let the same real person slip past as a "new" contact.
+# ---------------------------------------------------------------------------
+def find_prior_contact(linkedin_url: Optional[str], email: Optional[str]) -> Optional[dict]:
+    """Cross-workflow, cross-run advisory check (HARD RULE 3): returns the
+    MATCHING contacted_pocs row, or None. A hit is never blocking on its
+    own -- the caller drafts anyway and attaches the row as a collision
+    note. The within-run repeat block is a SEPARATE, simpler check done by
+    the caller against its own in-memory set of emails contacted so far in
+    THIS run, before this function is ever reached -- so a hit returned
+    here is guaranteed to be a genuinely prior (pre-this-run) contact."""
+    with cursor() as cur:
+        if linkedin_url:
+            cur.execute(
+                "SELECT * FROM contacted_pocs WHERE linkedin_url IS NOT NULL AND "
+                "lower(rtrim(regexp_replace(linkedin_url, '^https?://(www\\.)?', ''), '/')) = "
+                "lower(rtrim(regexp_replace(%s, '^https?://(www\\.)?', ''), '/')) "
+                "ORDER BY contacted_at LIMIT 1",
+                (linkedin_url,),
+            )
+            row = cur.fetchone()
+            if row:
+                return row
+        if email:
+            cur.execute(
+                "SELECT * FROM contacted_pocs WHERE lower(email) = lower(%s) "
+                "ORDER BY contacted_at LIMIT 1",
+                (email,),
+            )
+            row = cur.fetchone()
+            if row:
+                return row
+    return None
+
+
+def record_contacted(linkedin_url: Optional[str], email: Optional[str], poc_name: str,
+                     firm_name: str, gmail_draft_id: str, source_workflow: str = "D") -> None:
+    """Mirrors referral-system's dbc.record_contacted exactly (same table,
+    same ON CONFLICT target): a repeat linkedin_url updates the existing row
+    to this latest contact event rather than silently no-opping, so the one
+    row that can exist for a given LinkedIn URL never goes stale."""
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """INSERT INTO contacted_pocs
+                   (linkedin_url, email, poc_name, firm_name, source_workflow, gmail_draft_id)
+                   VALUES (%s,%s,%s,%s,%s,%s)
+                   ON CONFLICT (linkedin_url) WHERE linkedin_url IS NOT NULL DO UPDATE SET
+                     email = EXCLUDED.email,
+                     poc_name = EXCLUDED.poc_name,
+                     firm_name = EXCLUDED.firm_name,
+                     contacted_at = now(),
+                     gmail_draft_id = EXCLUDED.gmail_draft_id,
+                     source_workflow = EXCLUDED.source_workflow""",
+                (linkedin_url, email, poc_name, firm_name, source_workflow, gmail_draft_id),
+            )
+        c.commit()
+
+
+# ---------------------------------------------------------------------------
 # wd_queue
 # ---------------------------------------------------------------------------
 def enqueue(run_id: int, firms: list[tuple[str, str]]) -> int:

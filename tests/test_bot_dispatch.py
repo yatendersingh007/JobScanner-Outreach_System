@@ -5,17 +5,12 @@ authorization boundary specifically) directly. Never run_bot()'s loop, no
 live token, no network, no real Postgres -- run_scan/run_single_firm/
 run_resume and every wd_dbc call bot.py makes are monkeypatched.
 
-Two things this file deliberately does NOT test as PROMPTS.md originally
-worded them, and why:
-
-- "/scan with no args drafts" -- superseded by explicit instruction: this
-  build has no signal_drafting.py yet (prompts 3-4), so /scan must instead
-  fail LOUDLY ("drafting is not built yet ... use /scan dry"), never
-  silently behave like --dry. Tested as such below.
-- "DRAFT_CAP_PER_RUN=2 against 5 qualified firms drafts exactly 2 and parks
-  3" -- there is no real drafting to exercise yet. Tested instead as the
-  draft-INTENT message's arithmetic (2 would be drafted, 3 over cap), which
-  is the actual, honest behavior this build produces per prompt 2 step 2a.
+Prompt 3 note: bot.py mocks `run_scan` wholesale in every test below, so it
+never exercises run_scan.py's own drafting wiring (the spend/draft-intent
+message and the DRAFTED/NO EMAIL/etc. summary sections) -- that lives inside
+the mocked function now, not in bot.py, and is covered instead in
+tests/test_run_scan_drafting.py. This file only proves bot.py itself parses,
+authorizes, and formats -- no business logic, per its own module docstring.
 """
 from __future__ import annotations
 
@@ -205,20 +200,21 @@ def test_scan_dry_reports_dry_stop_and_skips_the_not_built_note(monkeypatch, wir
     assert "would be drafted" not in combined  # 2a's intent message is dry-gated, never sent
 
 
-def test_scan_no_args_fails_loudly_not_silently_dry(monkeypatch, wire):
-    """The exact behavior checked this round: /scan with no args must say
-    'drafting not built yet ... use /scan dry' out loud, never quietly
-    behave like --dry."""
+def test_scan_no_args_does_not_behave_like_dry(monkeypatch, wire):
+    """/scan with no args must actually draft, never silently behave like
+    --dry (Prompt 1's original requirement). Drafting is built now (Prompt
+    3), so the honest check is that its summary is never the dry-run stop
+    message, and the drafted firm actually shows up."""
     result = RunResult(run_id=2, mode="manual", recency_days_used=1, dry=False)
     result.qualified = [_qualified_firm()]
+    result.drafted = [{"poc_name": "Jane Doe", "poc_email": "jane@x.example", "gmail_draft_id": "D1"}]
     monkeypatch.setattr(bot, "run_scan", lambda **kw: result)
 
     bot._handle_scan("")
 
     combined = "\n".join(wire.sent)
-    assert "not built yet" in combined
-    assert "/scan dry" in combined
     assert "Dry run. Stopped after gating." not in combined
+    assert "DRAFTED 1" in combined
 
 
 def test_scan_passes_dry_false_by_default(monkeypatch, wire):
@@ -273,60 +269,10 @@ def test_scan_firm_calls_run_single_firm_not_run_scan(monkeypatch, wire):
     assert single_called[0]["firm_name"] == "O'Brien Capital"
 
 
-# ---------------------------------------------------------------------------
-# Draft-intent message (prompt 2 step 2a) -- the honest stand-in for "drafts
-# exactly N and parks the rest" until signal_drafting.py exists.
-#
-# The arithmetic itself (drafts_planned/drafts_over_cap) is computed by
-# signal_pipeline._apply_draft_cap_fields(), tested in test_recency_window.py
-# -- bot.py only READS and formats those two fields now, per the fix that
-# moved the computation out of bot.py (it was duplicating what the pipeline
-# would also need to compute for real once drafting exists). So here we set
-# them directly on the mock RunResult, the same way run_scan()/
-# run_single_firm()/run_resume() already would have, and check only the
-# formatting.
-# ---------------------------------------------------------------------------
-def test_draft_intent_message_formats_pipeline_computed_fields(monkeypatch, wire):
-    result = RunResult(run_id=5, mode="manual", recency_days_used=1, dry=False)
-    result.qualified = [_qualified_firm(f"Firm {i}", i) for i in range(5)]
-    result.drafts_planned = 2
-    result.drafts_over_cap = 3
-    monkeypatch.setattr(bot, "run_scan", lambda **kw: result)
-
-    bot._handle_scan("")
-
-    combined = "\n".join(wire.sent)
-    assert "5 qualified" in combined
-    assert "2 would be drafted" in combined
-    assert "3 over cap" in combined
-
-
-def test_draft_intent_message_does_not_compute_its_own_arithmetic(monkeypatch, wire):
-    """bot.py must not recompute drafts_planned/drafts_over_cap itself --
-    changing DRAFT_CAP_PER_RUN here must have NO effect on the message,
-    since only the pipeline-set fields on the result are read."""
-    monkeypatch.setattr(bot.config, "DRAFT_CAP_PER_RUN", 999)
-    result = RunResult(run_id=5, mode="manual", recency_days_used=1, dry=False)
-    result.qualified = [_qualified_firm(f"Firm {i}", i) for i in range(5)]
-    result.drafts_planned = 2
-    result.drafts_over_cap = 3
-    monkeypatch.setattr(bot, "run_scan", lambda **kw: result)
-
-    bot._handle_scan("")
-
-    combined = "\n".join(wire.sent)
-    assert "2 would be drafted" in combined
-    assert "3 over cap" in combined
-
-
-def test_draft_intent_message_omitted_when_qualified_is_zero(monkeypatch, wire):
-    result = RunResult(run_id=8, mode="manual", recency_days_used=1, dry=False)
-    monkeypatch.setattr(bot, "run_scan", lambda **kw: result)
-
-    bot._handle_scan("")
-
-    combined = "\n".join(wire.sent)
-    assert "would be drafted" not in combined
+# Draft-intent message (prompt 2 step 2a) now lives inside run_scan.py's own
+# _run_drafting(), which fires between gating and drafting -- unreachable
+# through bot.py's tests here since they mock run_scan wholesale. Covered in
+# tests/test_run_scan_drafting.py instead.
 
 
 # ---------------------------------------------------------------------------
