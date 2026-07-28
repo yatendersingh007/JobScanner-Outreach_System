@@ -38,6 +38,15 @@ MUST_FIRE = [
     "This comes through Singh Capital's network.",
     "As we discussed on our call last week.",
     "We spoke with your team before about this.",
+    # prior_contact_claim boundary cases (the fix that replaced a bare
+    # character-gap widening with a you/your-anchored check -- see
+    # BUILD_LOG.md): genuine prior-contact claims with a longer clause
+    # between the verb and the temporal word.
+    "We spoke with your controller before, back in March.",
+    "We talked with someone at your firm previously.",
+    "We have been in touch with your office earlier this year.",
+    "We connected with your CFO earlier this quarter.",
+    "We spoke to you before, at the conference in Dallas last fall.",
 ]
 
 # Near-misses: share a word with a forbidden pattern, but not its meaning.
@@ -48,6 +57,15 @@ MUST_NOT_FIRE = [
     "Our operators plug into your network of Yardi entities directly.",
     "The introduction to our process takes about ten days.",
     "Their portfolio spans a connected set of multifamily assets.",
+    # prior_contact_claim boundary near-misses: "we <verb> ... before" with
+    # no reference to the recipient at all -- these were false positives
+    # under a plain 40-char gap widening, caught before it shipped.
+    "We have talked to operators who ran multifamily books before joining X Analyst.",
+    "We connected two ledger systems before go-live last quarter.",
+    "We have worked with property managers before, across several states.",
+    "We talked through the transition plan before handing off the close.",
+    "We have spoken with dozens of CRE controllers before, and the story repeats.",
+    "We talked to three CFOs last month before drafting this offering.",
 ]
 
 

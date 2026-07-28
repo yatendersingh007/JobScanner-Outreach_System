@@ -942,3 +942,153 @@ replaced existing assertions in place rather than adding new tests). 0
 failures.
 
 Not started: prompt 4 (deck), still.
+
+---
+
+## Two more fixes before prompt 4 - 2026-07-29
+
+**1. `prior_contact_claim`'s 15->40 char widening was a real regression,
+narrowed and made its own decision.** The prior commit widened the gap
+between "we spoke/talked/connected/been in touch" and
+"before/previously/earlier" from `{0,15}` to `{0,40}` as a side edit inside
+a commit about three unrelated things, to fix one failing must-fire case
+("We spoke with your team before about this.", a 16-char gap, one over the
+old ceiling). Printed exactly what the 40-char version newly catches versus
+the 15-char version (12-case script, run directly, not reasoned about by
+eye):
+
+Newly caught at 40 chars that the 15-char version missed, ALL genuine
+prior-contact claims (correct to catch):
+- "We spoke with your team before about this."
+- "We spoke with your controller before, back in March."
+- "We talked with someone at your firm previously."
+- "We have been in touch with your office earlier this year."
+
+Also newly caught at 40 chars, but NONE of these are claims of prior
+contact with the recipient -- **the widening was over-broad**:
+- "We have talked to operators who ran multifamily books before joining X
+  Analyst." ("before" subordinates "joining", a career-history clause about
+  the OPERATORS, not the recipient)
+- "We connected two ledger systems before go-live last quarter." (object is
+  "two ledger systems," not a person)
+- "We talked through the transition plan before handing off the close."
+  ("before" subordinates a different action)
+- "We have spoken with dozens of CRE controllers before, and the story
+  repeats." (a general credibility claim about the sender's aggregate
+  history with OTHER firms, not this one -- no "you"/"your" anywhere)
+- "We talked to three CFOs last month before drafting this offering."
+  (again, general history, not about the recipient)
+
+**Narrowed.** The discriminator that separates every genuine case from every
+false positive above: the recipient is referenced ("you"/"your") somewhere
+in the same clause as the temporal word. A bare character-gap can't express
+that; two independent, order-independent lookaheads can. New pattern:
+```python
+r"\bwe\s+(?:have\s+)?(?:spoke|spoken|talked|connected|been\s+in\s+touch)\b"
+r"(?=[^.?!]{0,45}\b(?:you|your)\b)(?=[^.?!]{0,45}\b(?:before|previously|earlier)\b)"
+```
+Both lookaheads scope to the same sentence (`[^.?!]`) and don't care which
+of "you/your" or "before/previously/earlier" comes first. Re-verified: all
+6 genuine cases still fire, all 6 false positives from the 40-char version
+now correctly don't. Note this is airtight for THIS system specifically,
+not in general: Block 2/4's generation prompt never gives the LLM the POC's
+name, only the research object and posting facts, so a generated claim
+about prior contact can only ever be phrased in second person ("you"/
+"your") -- it has no other way to refer to the recipient. A hypothetical
+"we spoke with Jane before" (a named POC, no "you"/"your") would slip past
+this check, but nothing in this pipeline can ever produce that sentence,
+since the model is never told the name.
+
+All 11 new cases (5 must-fire boundary cases -- the 6th, "We spoke with your
+team before about this.", already existed -- and 6 must-not-fire near-misses)
+added to `tests/test_signal_drafting.py`'s `MUST_FIRE`/`MUST_NOT_FIRE`
+matrices, which are parametrized, so this adds 11 parametrized cases, not
+11 new `def`s.
+
+**2. The Apollo gap, sized properly -- a scope finding, not a prompt-5
+to-do.**
+
+The seam spec, as captured in `BUILD_STATE.md` (built against
+`WORKFLOW_D_BRIEF.md`, which is not itself a file present in this
+repository -- quoting the surviving artifact, not the brief directly):
+"**POC** -- `apollo_enrich`, senior finance titles first. The scanner's
+TinyFish `poc_name` is stored as `poc_name_hint` and is a name hint only,
+never an email source." `CLAUDE.md`'s own pipeline line says the same
+thing: "... -> Apollo senior finance POC -> personalized cold email ...".
+**That step does not exist.** Confirmed directly (Prompt 3 follow-up 1):
+`apollo_enrich.py`'s entire public surface is `find_email(poc_name,
+company_name, ...)`, and the only Apollo endpoint reachable anywhere in the
+vendored closure is the single-person `people/match`. There is no code path
+that searches Apollo for "whoever holds a senior finance title at this
+company" -- that needs `people/search`/`mixed_people/search`
+(`organization_domains` + `person_titles`, no name required), which exists
+in neither `referral-system` nor `job-scanner`.
+
+**What actually bounds drafts per run, traced through the real code, not
+assumed:**
+
+1. `scanner/pipeline.py` calls `poc_enricher.enrich(kept, cfg)` on `kept` --
+   EVERY classified posting that survived title/geo/recency filtering,
+   across ALL categories the scanner tracks, not just Real Estate/Family
+   Office. This runs BEFORE Workflow D's own category filter
+   (`signal_pipeline.group_by_company`) ever sees anything.
+2. `poc_enricher.compute_poc_map` caps TinyFish lookups at
+   `cfg.poc_enrich_cap` (`scanner/config.yaml`'s `poc_enrichment.cap_per_run`,
+   default 10) -- **per unique company across the WHOLE day's scan**,
+   consumed in `kept`'s sort order (freshest posting first --
+   `days_since_posted` ascending), with no category priority at all. A
+   Real Estate or Family Office company competes for those 10 slots on
+   equal footing with every "Other"/"Needs Review" company the scanner also
+   classified that day. Once the cap is hit, every remaining company --
+   Real Estate ones included -- gets `poc_source="CAP_REACHED"` and an
+   empty `poc_name`, cache hits from a prior run's lookup aside.
+   Staffing-blocklisted companies are skipped without consuming a cap slot,
+   but also get no hint (`SKIPPED_STAFFING`), consistent with Workflow D's
+   own separate staffing drop before the gate.
+3. Only a `wd_firms` row whose postings carry a `poc_name_hint` from step 2
+   can even reach `apollo_enrich.find_email` at all (Fix 2 from the last
+   round). Everything else parks in `no_email` regardless of `icp_status`.
+4. `GATE_CAP_PER_RUN=10` gates up to 10 NEW qualifying companies; `DRAFT_CAP_PER_RUN=5`
+   caps how many of those get drafted -- but only ones that ALSO survived
+   step 2's cap and step 3's Apollo resolution ever reach that ceiling at
+   all.
+
+**`DRAFT_CAP_PER_RUN=5` is not the binding constraint.** The real ceiling on
+a given day is `min(DRAFT_CAP_PER_RUN, number of qualified RE/Family Office
+firms that (a) won a slot in the scanner's category-blind 10-company
+POC-enrichment cap, AND (b) had `apollo_enrich.find_email` actually resolve
+an email for that hint)`. On a day where the scanner's title-match list
+surfaces many non-target-category postings fresher than the day's Real
+Estate/Family Office ones, (a) alone could leave every qualifying RE/FO firm
+with `poc_source="CAP_REACHED"` -- zero drafts possible that run, with
+`DRAFT_CAP_PER_RUN=5` never coming into play at all. This is invisible in
+today's Telegram summary beyond the `no_email_reason` string Fix 2 added;
+there is no visibility yet into how many of a day's qualified firms lost the
+POC-enrichment race specifically (as opposed to Apollo failing to resolve a
+name it was given) -- worth a summary line, not attempted here, out of
+scope for a two-fix round.
+
+**What closing this would take:** a new Apollo integration calling
+`people/search` or `mixed_people/search` with `organization_domains` +
+`person_titles` (a senior-finance title list: CFO, Controller, VP Finance,
+Director of Finance, Head of Accounting, etc.), returning a ranked list of
+candidates per company instead of resolving one already-named person. This
+is net-new development against a metered, plan-gated API that neither donor
+repo has ever called -- `apollo_enrich.py`/`lib_snapshot/enrichment/apollo.py`
+only ever call `people/match`, and `bulk_match`'s own documented 403 on the
+current plan is a warning sign, not a green light, for whether a search
+endpoint is even reachable on this account. It is not vendoring, and it is
+not wiring an existing call differently -- it needs its own request/response
+handling, its own rate-limit and cost accounting (a search call plausibly
+costs more credits than a match call), its own test fixtures, and a live
+credential check against the real Apollo plan before any of it can be
+trusted. Left undecided here on purpose, per instruction: whether this
+absorbs into prompt 5 or becomes its own prompt is a scope call, not a
+sizing call, and the sizing is what this entry provides.
+
+Tests: 248 passed (delta +11, all parametrized boundary cases in
+`test_forbidden_claims_must_fire`/`test_forbidden_claims_must_not_fire`). 0
+failures.
+
+Not started: prompt 4 (deck), still. The Apollo POC-search gap is now sized
+and open for a scope decision before prompt 5.

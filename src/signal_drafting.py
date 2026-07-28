@@ -287,9 +287,21 @@ _FORBIDDEN_CLAIM_PATTERNS: dict[str, re.Pattern] = {
     "colleague_attribution": re.compile(
         r"\b(?:a\s+)?colleague\s+(?:recommended|suggested|mentioned|referred)\b", re.IGNORECASE,
     ),
+    # "we <verb> ... before/previously/earlier": widening the character gap
+    # alone (a prior fix, done as a side edit and reverted here -- see
+    # BUILD_LOG.md) is over-broad -- at 40 chars it also caught "we talked to
+    # operators before joining X Analyst" and "we connected two ledger
+    # systems before go-live," neither a claim about prior contact with THIS
+    # firm. The real distinguishing signal a genuine forbidden claim has and
+    # a false positive lacks: the recipient is referenced ("you"/"your")
+    # somewhere in the same clause as the temporal word. Two independent
+    # lookaheads (order-independent, both scoped to the same sentence via
+    # [^.?!]) require BOTH "you"/"your" AND "before"/"previously"/"earlier"
+    # to appear within the same clause as the verb -- neither alone is
+    # sufficient, which is what a bare character-gap widening missed.
     "prior_contact_claim": re.compile(
-        r"\bwe\s+(?:have\s+)?(?:spoke|spoken|talked|connected|been\s+in\s+touch)\b[^.?!]{0,40}\b"
-        r"(?:before|previously|earlier)\b|"
+        r"\bwe\s+(?:have\s+)?(?:spoke|spoken|talked|connected|been\s+in\s+touch)\b"
+        r"(?=[^.?!]{0,45}\b(?:you|your)\b)(?=[^.?!]{0,45}\b(?:before|previously|earlier)\b)|"
         r"\bas\s+we\s+discussed\b|\bfollowing\s+up\s+on\s+(?:our|my)\s+(?:call|conversation|chat)\b",
         re.IGNORECASE,
     ),
