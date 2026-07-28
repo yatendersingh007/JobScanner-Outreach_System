@@ -40,9 +40,20 @@ EXPECTED_SOURCES = [
 # ── Cost controls (BRIEF 4, open decision 11.2) ───────────────────────────
 GATE_CAP_PER_RUN = _int("GATE_CAP_PER_RUN", 10)     # NEW companies gated per run
 REGATE_WINDOW_DAYS = _int("REGATE_WINDOW_DAYS", 90)  # reuse a verdict this fresh
-DRAFT_CAP_PER_RUN = _int("DRAFT_CAP_PER_RUN", 10)
+# Lower than GATE_CAP_PER_RUN on purpose (Prompt 1): scan drafts by default now,
+# with no human confirm between gating and drafting, so this cap IS the guard.
+# Exceeding it parks the remainder in the queue for /resume; it never silently
+# truncates and never drafts past the ceiling.
+DRAFT_CAP_PER_RUN = _int("DRAFT_CAP_PER_RUN", 5)
 TINYFISH_STEP_CAP_PER_RUN = _int("TINYFISH_STEP_CAP_PER_RUN", 200)
 MAX_LLM_TOKENS_PER_FIRM = _int("MAX_LLM_TOKENS_PER_FIRM", 25000)
+
+# ── Manual trigger + catch-up window (Prompt 1) ───────────────────────────
+# No timer, ever (HARD RULE 2). Every run starts from a human command, so a
+# gap between runs (a holiday, a skipped day) is real and must be an explicit,
+# bounded choice, not silently absorbed or silently ignored.
+DEFAULT_SCAN_DAYS = _int("DEFAULT_SCAN_DAYS", 1)
+MAX_SCAN_DAYS = _int("MAX_SCAN_DAYS", 14)
 
 # ── Drafting ──────────────────────────────────────────────────────────────
 EMAIL_MAX_WORDS = _int("EMAIL_MAX_WORDS", 260)
@@ -64,10 +75,5 @@ AUTHORIZED_USER_IDS = [
     u.strip() for u in os.getenv("AUTHORIZED_USER_IDS", "").split(",") if u.strip()
 ]
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-
-# Scheduled runs scan and gate, then STOP and ask. Drafting spends Apollo
-# credits and writes into Harp's Gmail, so the unattended path never drafts
-# without a human confirming the day's qualified list.
-AUTO_DRAFT_ON_SCHEDULE = _bool("AUTO_DRAFT_ON_SCHEDULE", False)
 
 GENERATED_DECKS_DIR = Path(os.getenv("GENERATED_DECKS_DIR", str(ROOT / "output" / "decks")))

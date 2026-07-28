@@ -71,11 +71,12 @@ def firm_key(name: str) -> str:
 # ---------------------------------------------------------------------------
 # wd_runs
 # ---------------------------------------------------------------------------
-def create_wd_run(mode: str) -> dict:
+def create_wd_run(mode: str, recency_days_used: int = 1) -> dict:
     with conn() as c:
         with c.cursor() as cur:
             cur.execute(
-                "INSERT INTO wd_runs (mode) VALUES (%s) RETURNING *", (mode,)
+                "INSERT INTO wd_runs (mode, recency_days_used) VALUES (%s, %s) RETURNING *",
+                (mode, recency_days_used),
             )
             row = cur.fetchone()
         c.commit()

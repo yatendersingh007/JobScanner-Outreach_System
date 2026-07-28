@@ -116,3 +116,114 @@ was never touched, no classmethod added to it):
    and the evidence shows it does not.
 5. Committed — see the commit this entry is part of for the exact message,
    `git log --stat -1`, and post-commit `git status --short`.
+
+## Prompt 1 - manual trigger only, and the catch-up window - 2026-07-28
+
+Diagnose (printed and confirmed before building): `scanner/pipeline.py`'s
+`effective_days = max(cfg.recency_days, cfg.first_seen_grace_days) if
+newly_seen else cfg.recency_days`, with `recency_days=1` and
+`first_seen_grace_days=3` in the live `config.yaml`. A posting published 4
+days ago, never seen before, after a 6-day gap: `effective_days =
+max(1,3)=3`, `4 > 3`, dropped. No timer ever exercised this because the gap
+was always 1 day; manual triggering makes a real gap possible.
+
+Built:
+- `src/wd_config.py`: deleted `AUTO_DRAFT_ON_SCHEDULE` (meaningless with no
+  scheduler). Added `DEFAULT_SCAN_DAYS=1`, `MAX_SCAN_DAYS=14`. Changed
+  `DRAFT_CAP_PER_RUN` default from 10 to 5, lower than `GATE_CAP_PER_RUN` on
+  purpose: with no confirm step between gating and drafting, this cap is now
+  the only guard.
+- `src/wd_dbc.py`: `create_wd_run(mode, recency_days_used=1)`.
+- `migrations/wd_002_recency_days_used.sql`: additive,
+  `ALTER TABLE wd_runs ADD COLUMN IF NOT EXISTS recency_days_used INTEGER NOT NULL DEFAULT 1`.
+- `src/signal_pipeline.py`: `scan(recency_days: int = 1, progress=_noop)`
+  keeps the existing assert that `config.yaml` itself says `recency_days: 1`
+  (file drift can never silently widen the window), then overrides
+  `cfg.recency_days` in memory for this run only. New
+  `_resolve_recency_days(days)` defaults to `DEFAULT_SCAN_DAYS` and raises
+  `ValueError` outside `1..MAX_SCAN_DAYS`. `run()`'s `mode` default changed
+  from `"scheduled"` to `"manual"` (there is no schedule); it now accepts
+  `recency_days`, persists it as `recency_days_used`, and emits "Window: last
+  N days (catch-up)..." via `progress()` when N > 1.
+- `src/daily_run.py` DELETED. `src/run_scan.py` created:
+  `run_scan(mode, days=None, dry=False, gate_cap=None, progress=...) ->
+  RunResult`, plus `summarize(result) -> str` (the run summary, reused by both
+  the CLI and, later, the bot). Drafting is not built yet (prompts 3-4);
+  `summarize()` says so explicitly and distinctly from an operator-requested
+  `--dry`, rather than the two states reading the same.
+- `src/cli.py` created: `python -m src.cli scan [--days N] [--dry] [--cap N]
+  [--firm "Name"]`. `scan` drafts by default (per prompt 4's inversion);
+  `--dry` is the opt-out. `--firm` is accepted (matching the eventual `/scan
+  "Firm"` bot command's surface) but errors loudly if used, since single-firm
+  mode is not built until prompt 2.
+- `deploy/workflow-d.service` and `deploy/workflow-d.timer` DELETED.
+  `deploy/workflow-d-bot.service` created: `Type=simple`, `Restart=always`,
+  `RestartSec=10`, `ExecStart=... -m src.bot`. `deploy/install.sh` updated to
+  install and enable the bot unit instead of the timer, keeping the
+  tee-not-systemctl-edit drop-in pattern and `systemctl show` verification
+  (re-pointed at the bot service).
+- `CLAUDE.md`: added a landmine (below) and corrected the `## Commands`
+  section, which still showed the old `scan` / `scan --pursue` interface.
+- `DRIFT.md`: added a donor observation on `scanner/pipeline.py`'s
+  `is_new()`-before-`first_seen()` ordering, marked "not filed, no local
+  fix" in the same column as the `migrate()` donor bug. Not changed:
+  reordering a vendored file's insert changes semantics for a file two other
+  workflows may later share.
+- `tests/test_recency_window.py` created: default/bounds on
+  `_resolve_recency_days`, a 4-day-old posting dropped at days=1 and kept at
+  days=7 (isolated seen.db's each), the real-world 3-run sequence sharing one
+  seen.db (drop at days=1 + record, recover at days=7 via explicit override
+  even though `newly_seen` is now `False`, drop again at days=1), persistence
+  of `recency_days_used` to `create_wd_run` (mocked, no DB), and the
+  catch-up line appearing in `summarize()` only when N > 1. Fake connector
+  (`scanner.connectors.base.Connector` subclass returning canned jobs),
+  `scanner.pipeline.run(cfg, today=...)`'s injectable `today` param, and
+  `tmp_path`-backed `seen.db`/`jobs.csv` — no network, no real Postgres.
+
+New landmine added to CLAUDE.md: the recency grace window is one-shot per
+posting. `store.first_seen(key, today)` writes to `seen.db` unconditionally,
+before the recency filter decides keep/drop, so a dropped posting is
+permanently marked "seen" as of that run. The automatic
+`max(recency_days, first_seen_grace_days)` grace bump only applies while
+`newly_seen` is `True` (exactly once per key); recovering it later requires
+an explicit wider `--days` on that specific later run. After a gap, the
+catch-up run must come FIRST.
+
+Also fixed, noticed while writing this prompt's Telegram-facing summary text:
+several em dashes in the run-summary strings and `--firm`'s help text
+(inherited from the original `daily_run.py`), which violates CLAUDE.md's
+style rule ("No em dashes. Harp flags them as an AI tell.") for exactly the
+kind of text that rule is protecting — the literal message Harp reads in
+Telegram. Rewrote with commas/periods. Left em dashes in module
+docstrings/code comments alone (developer-facing, not the operational
+message surface); flagging in case a broader docs pass is wanted later.
+
+Tests: 86 passed (delta +11), 0 failures, 0 errors.
+
+VERIFY, printed for the record:
+- `grep -rniE "OnCalendar|APScheduler|cron|schedule" src/ deploy/` is not
+  byte-empty: three hits, all comments stating there is NO scheduler
+  (`src/run_scan.py:5`, `deploy/install.sh:6`, `deploy/workflow-d-bot.service:14`).
+  No actual scheduling directive, import, or cron entry exists anywhere in
+  either tree.
+- CLI help (`python -m src.cli scan --help`) printed and read: `--dry` is
+  documented as "the opt-out, not the default"; running `scan` with no flags
+  drafts (once drafting exists) rather than requiring a separate pursue step.
+- `src/daily_run.py` confirmed absent; `src/run_scan.py` confirmed present.
+  No import collision, no `ImportError` risk on the VM from both existing.
+
+Deviations from the prompt, and why: none from the BUILD steps themselves.
+The em-dash cleanup above was not asked for this round but was done in the
+same breath as writing the affected text, not as a separate unrequested pass.
+
+Open for next session:
+- `--firm` is accepted by the argparse surface but not wired to any logic;
+  prompt 2's bot command table is where single-firm gating actually gets
+  built.
+- `src/run_scan.py`'s drafting stand-in message ("Drafting is not built yet")
+  needs to be replaced once prompts 3-4 land `signal_drafting.py` — search
+  for `"Drafting is not built yet"` to find the call site.
+- The `migrate()` missing-`MIGRATIONS_DIR` donor bug (Prompt 0) and the
+  `is_new`/`first_seen` ordering donor observation (this prompt) both still
+  need filing against referral-system / job-scanner respectively; neither has
+  been filed yet.

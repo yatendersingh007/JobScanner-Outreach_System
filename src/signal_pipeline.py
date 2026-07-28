@@ -84,6 +84,8 @@ class FirmGroup:
 @dataclass
 class RunResult:
     run_id: int
+    recency_days_used: int = 1
+    dry: bool = False  # set by src/run_scan.py; not touched by signal_pipeline itself
     postings_raw: int = 0
     postings_kept: int = 0
     groups: int = 0
@@ -175,29 +177,39 @@ def group_by_company(jobs: list, blocklist: list[str]) -> tuple[list[FirmGroup],
 # ---------------------------------------------------------------------------
 # Scanner invocation
 # ---------------------------------------------------------------------------
-def scan(progress: Progress = _noop):
+def scan(recency_days: int = 1, progress: Progress = _noop):
     """Run the vendored Job Scanner and return (kept_jobs, cfg, csv_path).
 
     Workflow D uses the importable entry only. app.py and the Flask layer are
     not used (BRIEF 2). config.yaml already carries D's required settings:
     recency_days=1, regions [US, Canada], require_title_match=true, the full
     title_patterns list, classifier enabled.
+
+    `recency_days` overrides cfg.recency_days IN MEMORY for this run only
+    (Prompt 1's catch-up window, e.g. after a holiday gap). config.yaml on
+    disk is never touched, so file drift can never silently widen the window
+    for every future run — see the assert below.
     """
     from scanner import pipeline as scanner_pipeline
     from scanner import config as scanner_config
 
     cfg = scanner_config.load(config.SCANNER_CONFIG_PATH)
 
-    # Assert rather than mutate. If someone edits config.yaml to recency_days=7
-    # for a manual investigation and forgets to put it back, the 9 AM run must
-    # fail loudly instead of quietly emailing week-old signals as "today".
+    # Assert rather than mutate on disk. If someone edits config.yaml to
+    # recency_days=7 for a manual investigation and forgets to put it back,
+    # a run must fail loudly instead of quietly emailing week-old signals as
+    # "today". A one-off catch-up window is `--days N`, not a config.yaml edit.
     if cfg.recency_days != 1:
         raise ValueError(
-            f"scanner recency_days is {cfg.recency_days}, Workflow D requires 1. "
-            "A stale posting invalidates the email's central claim."
+            f"scanner recency_days is {cfg.recency_days}, Workflow D requires 1 "
+            "in config.yaml. A stale posting invalidates the email's central "
+            "claim. Use --days N for a one-off catch-up window instead."
         )
     if not cfg.require_title_match:
         raise ValueError("scanner require_title_match is false, Workflow D requires true.")
+
+    if recency_days != cfg.recency_days:
+        cfg.recency_days = recency_days
 
     progress("Scanning job boards...")
     kept = scanner_pipeline.run(cfg)
@@ -319,17 +331,41 @@ def _reuse_cached(run_id: int, group: FirmGroup, cached: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Catch-up window (Prompt 1, manual trigger only, no timer)
+# ---------------------------------------------------------------------------
+def _resolve_recency_days(days: Optional[int]) -> int:
+    """Default to config.DEFAULT_SCAN_DAYS (1); validate 1 <= days <= MAX_SCAN_DAYS.
+
+    Outside that range raises rather than clamping, so a mistyped --days is a
+    loud error, not a silently different window than the operator asked for.
+    """
+    resolved = config.DEFAULT_SCAN_DAYS if days is None else days
+    if not (1 <= resolved <= config.MAX_SCAN_DAYS):
+        raise ValueError(
+            f"recency_days must be between 1 and {config.MAX_SCAN_DAYS}, got {resolved}"
+        )
+    return resolved
+
+
+# ---------------------------------------------------------------------------
 # The run
 # ---------------------------------------------------------------------------
-def run(mode: str = "scheduled", progress: Progress = _noop,
-        gate_cap: Optional[int] = None) -> RunResult:
+def run(mode: str = "manual", progress: Progress = _noop,
+        gate_cap: Optional[int] = None, recency_days: Optional[int] = None) -> RunResult:
     cap = config.GATE_CAP_PER_RUN if gate_cap is None else gate_cap
     window = config.REGATE_WINDOW_DAYS
+    days = _resolve_recency_days(recency_days)
 
-    run_row = dbc.create_wd_run(mode)
-    result = RunResult(run_id=run_row["id"])
+    run_row = dbc.create_wd_run(mode, recency_days_used=days)
+    result = RunResult(run_id=run_row["id"], recency_days_used=days)
+    if days > 1:
+        progress(
+            f"Window: last {days} days (catch-up). Postings older than {days} "
+            "days that a prior run already recorded are not recoverable by "
+            "widening further."
+        )
     try:
-        jobs, cfg, csv_path = scan(progress)
+        jobs, cfg, csv_path = scan(recency_days=days, progress=progress)
         # scanner/pipeline.run returns only what survived its own filters, so
         # raw and kept are the same number here. Raw counts live in the
         # scanner's own log line.

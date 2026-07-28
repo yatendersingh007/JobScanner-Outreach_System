@@ -1,0 +1,23 @@
+[Unit]
+Description=Workflow D (signal-driven outreach) Telegram bot
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=outreach
+Group=outreach
+WorkingDirectory=/opt/workflow-d
+EnvironmentFile=/opt/workflow-d/.env
+# Unbuffered so journalctl shows progress live, not only at exit or restart.
+ExecStart=/opt/workflow-d/.venv/bin/python -u -m src.bot
+# Long-running long-poll process, not a scheduled oneshot (HARD RULE 2: no
+# timer, ever). If the process dies (a crash, a network blip on the long-poll
+# connection), it comes back on its own.
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

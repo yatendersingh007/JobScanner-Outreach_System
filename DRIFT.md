@@ -72,7 +72,7 @@ referral-system's `lib_snapshot/db.py`.**
 
 | Target path | Source repo | Source path | Commit | Local edits | Filed against donor |
 |---|---|---|---|---|---|
-| scanner/pipeline.py | job-scanner | scanner/pipeline.py | 8a5392c | none — this is the entry point the import graph was traced from; initially missed in the first copy pass (only its 18-file closure was copied) and added when `from scanner import pipeline` failed at VERIFY | n/a |
+| scanner/pipeline.py | job-scanner | scanner/pipeline.py | 8a5392c | none — this is the entry point the import graph was traced from; initially missed in the first copy pass (only its 18-file closure was copied) and added when `from scanner import pipeline` failed at VERIFY | **not filed, no local fix** — see donor observation below |
 | scanner/__init__.py | job-scanner | scanner/__init__.py | 8a5392c | none | n/a |
 | scanner/classifier.py | job-scanner | scanner/classifier.py | 8a5392c | none | n/a |
 | scanner/config.py | job-scanner | scanner/config.py | 8a5392c | none | n/a |
@@ -93,6 +93,27 @@ referral-system's `lib_snapshot/db.py`.**
 | scanner/connectors/adapters/theirstack.py | job-scanner | scanner/connectors/adapters/theirstack.py | 8a5392c | none | n/a |
 | scanner/config.yaml | job-scanner | config.yaml (repo root, not scanner/) | 8a5392c | Relocated from job-scanner's repo root into scanner/ — matches `wd_config.py`'s existing `SCANNER_CONFIG_PATH` default (`ROOT/scanner/config.yaml`), not job-scanner's own layout. Also initially missed in the first copy pass; added when caught in VERIFY. | n/a |
 | classifier_rules.yaml (project root) | job-scanner | classifier_rules.yaml (repo root) | 8a5392c | Placed at the workflow-d project root, not inside scanner/. `scanner/classifier.py`'s `load_rules()` opens `cfg.classifier_rules_file` (default `"classifier_rules.yaml"`, a bare relative path resolved against the process's CWD, not against config.yaml's own location or `__file__`) — project-root placement matches the CWD `python -m src.cli scan`/the bot are expected to run from. **This placement is a judgment call, not verified end-to-end against an actual pipeline run yet** — flag for confirmation once `signal_pipeline.py`'s actual `classify()` call site is exercised. | n/a |
+
+**Donor observation, not filed, no local fix (Prompt 1 diagnose):**
+`scanner/pipeline.py:118-120` checks `newly_seen = store.is_new(key)` and then
+unconditionally calls `job.first_seen = store.first_seen(key, today)` —
+`SeenStore.first_seen()` inserts the key into `seen.db` right there, before
+the recency filter (line 128) has decided whether to keep or drop the
+posting. So a posting the recency filter drops is still permanently recorded
+as "seen" as of that run's date. Net effect: the automatic grace-window bump
+(`effective_days = max(cfg.recency_days, cfg.first_seen_grace_days)`) only
+ever applies while `newly_seen` is `True` — exactly once per key, on first
+sighting. Every later evaluation of the same key uses `cfg.recency_days`
+directly, with no automatic grace, so recovering a dropped posting requires
+the operator to explicitly pass a wider `recency_days` override on that later
+run; it never happens on its own. This is a real, reproducible behavior
+(confirmed by `tests/test_recency_window.py`'s three-run sequence: drop at
+days=1, recover at days=7 via explicit override, drop again at days=1), not
+a hypothetical. **Not changed here per explicit instruction**: reordering the
+insert would change semantics for a vendored file two other workflows may
+later share, and the fix (if any) belongs with the donor, not as a silent
+local patch. Recorded as a landmine in CLAUDE.md ("the recency grace window
+is one-shot per posting... after a gap, the catch-up run must come FIRST").
 
 ## Non-Python assets
 

@@ -117,6 +117,19 @@ Partners). Do not weaken it.
 - **LinkedIn boundary.** TinyFish targets are GUEST-search public URLs only,
   never authenticated LinkedIn. Patchright (account-level automation) stays
   off the VM. Do not conflate the two.
+- **The recency grace window is one-shot per posting.** `scanner/pipeline.py`
+  checks `store.is_new(key)` and then unconditionally calls
+  `store.first_seen(key, today)` — which writes the key into `seen.db` right
+  then, before the recency filter decides to keep or drop the posting. So a
+  posting dropped on its first sighting is still permanently marked "seen" as
+  of that run's date. The automatic grace bump (`max(recency_days,
+  first_seen_grace_days)`) only ever applies while `newly_seen` is `True`,
+  which is exactly once per key. Recovering a dropped posting on a later run
+  requires the operator to explicitly pass a wider `--days` for that specific
+  run; it never happens automatically again. **After a gap, the catch-up run
+  must come FIRST** — a normal `--days 1` run after a holiday, done before the
+  intentional catch-up run, permanently burns the one-shot grace window on
+  every posting it sees.
 - **`systemctl edit` can silently discard drop-ins.** Write `override.conf`
   via `tee`, verify with `systemctl show`.
 
@@ -137,7 +150,8 @@ Partners). Do not weaken it.
 ```bash
 pytest tests/ -q                       # local only, never on the VM
 python -c "from src import wd_dbc; wd_dbc.apply_migrations()"   # idempotent
-python -m src.cli scan                 # manual scan+gate, no drafting
-python -m src.cli scan --pursue        # scan, gate, draft
-python -m src.bot                      # long-poll Telegram bot
+python -m src.cli scan                 # full pipeline: scan, gate, draft (default)
+python -m src.cli scan --dry           # stop after gating, no Apollo/Gmail spend
+python -m src.cli scan --days N        # catch-up window after a gap (default 1, max 14)
+python -m src.bot                      # long-poll Telegram bot (prompt 2)
 ```
