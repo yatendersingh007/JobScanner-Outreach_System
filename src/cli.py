@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import wd_config as config
+from . import wd_config as config, wd_dbc as dbc
 from .run_scan import run_scan, run_single_firm, summarize
 
 
@@ -70,6 +70,11 @@ def main(argv: list | None = None) -> int:
                 gate_cap=args.cap,
                 progress=print,
             )
+    except dbc.RunAlreadyInProgress as e:
+        # Not this process's fault and not a crash: the Postgres advisory
+        # lock is held elsewhere (the bot, or another CLI invocation).
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

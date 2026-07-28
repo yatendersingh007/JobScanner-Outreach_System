@@ -11,11 +11,14 @@ firm Workflow D must not pay to gate again (BRIEF 4.4, the biggest cost lever).
 """
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from lib_snapshot import db as shared_db
+
+log = logging.getLogger("workflow-d.wd_dbc")
 
 conn = shared_db.conn
 cursor = shared_db.cursor
@@ -27,6 +30,84 @@ def apply_migrations() -> None:
 
 def _jsonb(value: Any) -> Any:
     return shared_db._jsonb(value)
+
+
+# ---------------------------------------------------------------------------
+# Single-run lock. src/cli.py and src/bot.py are two front doors into the
+# same Postgres and the same seen.db -- bot.py's _busy is an in-process
+# threading.Lock, so it cannot see a concurrent CLI process, and both could
+# gate (and spend Tavily/Apollo) at once. wd_runs.status is not proof of
+# liveness either: a crashed process leaves a 'running' row behind forever.
+# A session-scoped Postgres advisory lock covers both front doors with one
+# mechanism, and dies with the connection -- hence with the process -- the
+# instant it crashes, which a status column can never do.
+# ---------------------------------------------------------------------------
+class RunAlreadyInProgress(RuntimeError):
+    """Another process (CLI or bot) already holds the run lock. Raised
+    instead of a bare ValueError so each front door can word this for its
+    own surface."""
+
+
+_RUN_LOCK_KEY = 872346591  # arbitrary fixed bigint, unique to this one lock
+_run_lock_conn = None  # the connection THIS process is holding the lock on, if any
+
+
+def acquire_run_lock() -> bool:
+    """Try to acquire workflow-d's single-run advisory lock. Returns True if
+    acquired (or already held by this same process), False if another
+    session holds it.
+
+    Deliberately session-scoped (pg_try_advisory_lock), not transaction-
+    scoped: it must stay held across every dbc call for the whole run, and
+    it must release itself the moment the holding connection dies -- which
+    is exactly what happens when the process that opened it dies, crash or
+    not. That is the property a status column cannot offer.
+
+    Holds ONE connection checked out directly from the pool via getconn()
+    (not the usual conn()/cursor() context managers, which return the
+    connection to the pool the instant their `with` block exits) for as
+    long as the lock is held. This is required, not a style choice: a
+    session advisory lock is tied to the physical backend session, and a
+    pooled connection returned to the pool between calls can be handed to a
+    completely different caller before the run is done -- the lock has to
+    live on a connection this module keeps for itself until
+    release_run_lock() runs.
+    """
+    global _run_lock_conn
+    if _run_lock_conn is not None:
+        return True  # this process already holds it
+    pool = shared_db.get_pool()
+    c = pool.getconn()
+    try:
+        with c.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s) AS acquired", (_RUN_LOCK_KEY,))
+            acquired = cur.fetchone()["acquired"]
+        c.commit()
+    except Exception:
+        pool.putconn(c)
+        raise
+    if not acquired:
+        pool.putconn(c)
+        return False
+    _run_lock_conn = c
+    return True
+
+
+def release_run_lock() -> None:
+    """Release the run lock this process holds, if any. Safe to call even
+    when nothing was ever acquired."""
+    global _run_lock_conn
+    if _run_lock_conn is None:
+        return
+    c = _run_lock_conn
+    _run_lock_conn = None
+    pool = shared_db.get_pool()
+    try:
+        with c.cursor() as cur:
+            cur.execute("SELECT pg_advisory_unlock(%s)", (_RUN_LOCK_KEY,))
+        c.commit()
+    finally:
+        pool.putconn(c)
 
 
 # ---------------------------------------------------------------------------
@@ -135,17 +216,34 @@ def reconcile_orphaned_runs() -> int:
     forever -- latest_running_run() would find it and /cancel would flag a
     dead run and report success while changing nothing. Marks every such
     row 'crashed' with a note, and returns how many were reconciled so the
-    caller can report it."""
-    with conn() as c:
-        with c.cursor() as cur:
-            cur.execute(
-                "UPDATE wd_runs SET status='crashed', finished_at=now(), "
-                "notes='Reconciled at bot startup: process died mid-run (previous status was running)' "
-                "WHERE status='running' RETURNING id"
-            )
-            rows = cur.fetchall()
-        c.commit()
-    return len(rows)
+    caller can report it.
+
+    Only touches wd_runs if it can acquire the run lock first: holding the
+    lock IS the proof that no live run exists (a live run would already be
+    holding it, whether it's a bot run or a concurrent CLI run this bot
+    process has no other way to see). If the lock is already held, a run is
+    genuinely live -- leave every row alone and say so, rather than
+    reconciling out from under a process that is still working.
+    """
+    if not acquire_run_lock():
+        log.warning(
+            "reconcile_orphaned_runs: run lock is already held -- a run appears to "
+            "be live, leaving wd_runs rows alone."
+        )
+        return 0
+    try:
+        with conn() as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "UPDATE wd_runs SET status='crashed', finished_at=now(), "
+                    "notes='Reconciled at bot startup: process died mid-run (previous status was running)' "
+                    "WHERE status='running' RETURNING id"
+                )
+                rows = cur.fetchall()
+            c.commit()
+        return len(rows)
+    finally:
+        release_run_lock()
 
 
 def request_run_cancellation(run_id: int) -> None:

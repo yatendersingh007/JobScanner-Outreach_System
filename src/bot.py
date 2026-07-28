@@ -27,6 +27,13 @@ from . import wd_config as config, wd_dbc as dbc, wd_telegram as tg
 from .run_scan import run_resume, run_scan, run_single_firm, summarize
 
 log = logging.getLogger("workflow-d.bot")
+# Fast in-process guard only: stops this ONE bot process from spawning a
+# second background thread on top of its own already-running one (e.g. a
+# double /scan before the first has finished). It cannot see src/cli.py, a
+# separate process. The REAL cross-front-door guard is wd_dbc's Postgres
+# advisory lock (acquire_run_lock/release_run_lock), taken inside
+# run_scan()/run_single_firm()/run_resume() themselves -- _busy is a cheap
+# early exit, not the safety property.
 _busy = threading.Lock()
 _POLL_ERROR_BACKOFF_SEC = 5
 
@@ -179,6 +186,13 @@ def _run_scan_job(parsed: dict) -> None:
                 tg.send("Workflow D run started.")
                 result = run_scan(mode="manual", days=parsed.get("days"), dry=dry,
                                   progress=tg.progress)
+        except dbc.RunAlreadyInProgress as e:
+            # Not a crash: the Postgres advisory lock is held by another
+            # process (the CLI, or another bot instance) -- _busy only ever
+            # sees this same process, so this is the real cross-front-door
+            # guard actually firing.
+            tg.send(str(e))
+            return
         except ValueError as e:
             tg.send(f"Could not start: {e}")
             return
@@ -230,6 +244,9 @@ def _resume_job() -> None:
         tg.send("Resuming the latest crashed or cancelled run...")
         try:
             result = run_resume(progress=tg.progress)
+        except dbc.RunAlreadyInProgress as e:
+            tg.send(str(e))
+            return
         except Exception as e:  # noqa: BLE001
             tg.finish("crashed")
             tg.send(f"Resume failed: {type(e).__name__}: {e}")

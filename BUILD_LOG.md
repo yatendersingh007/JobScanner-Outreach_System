@@ -449,3 +449,106 @@ Tests: 153 passed (delta +16: +2 wd_dbc, +4 signal_pipeline draft-cap,
 0 failures.
 
 Not started: prompt 3, per instruction to stop here.
+
+## One fix before prompt 3, for real: the double-spend - 2026-07-28
+
+`_busy` (bot.py's in-process `threading.Lock`) cannot see `src/cli.py` -- a
+separate process. A CLI run and a bot run could both gate concurrently
+against the same Postgres and the same `seen.db`, both spending Tavily and
+Apollo. And `reconcile_orphaned_runs()` marked every `status='running'` row
+`crashed` unconditionally, so a bot restart mid-CLI-run would flip that run
+to `crashed` while it was still working, after which `latest_resumable_run()`
+would hand the same `wd_queue` rows to `/resume` -- two processes draining
+the same queue.
+
+Fixed with a Postgres session-scoped advisory lock in `wd_dbc`, covering
+both front doors with one mechanism:
+
+1. **`wd_dbc.acquire_run_lock()`/`release_run_lock()`**, using
+   `pg_try_advisory_lock`/`pg_advisory_unlock` on a fixed key
+   (`_RUN_LOCK_KEY`). Deliberately session-scoped, not transaction-scoped:
+   it must stay held across every `dbc` call for an entire run, and it must
+   die with the connection -- hence with the process -- the instant that
+   process crashes, which `wd_runs.status` structurally cannot do.
+   **Real subtlety, checked before writing any code**: `lib_snapshot.db`'s
+   `conn()` borrows a connection from a `psycopg_pool.ConnectionPool` and
+   returns it to the pool the instant its `with` block exits. A session
+   advisory lock is tied to the physical backend session, not to "whoever
+   calls `conn()` next" -- if the lock lived on a connection returned to
+   the pool between calls, a later unrelated caller could be silently
+   handed that same session (and thus appear to already hold the lock), or
+   `release_run_lock()` could run on a *different* connection than the one
+   that acquired it, unlocking nothing while the original session sits in
+   the pool holding the lock forever. Fixed by checking out ONE connection
+   directly via the pool's own `getconn()`/`putconn()` (confirmed to exist
+   on `psycopg_pool.ConnectionPool` 3.2.4 by inspecting the installed
+   library, not assumed) and holding it for the lock's entire lifetime,
+   never returning it to the pool via the normal `conn()`/`cursor()` path
+   until `release_run_lock()` runs.
+2. **`RunAlreadyInProgress(RuntimeError)`** added to `wd_dbc`.
+   `signal_pipeline.run()`, `run_scan.run_single_firm()`, and
+   `run_scan.run_resume()` all now call `acquire_run_lock()` as literally
+   their first action -- before `create_wd_run()` (or, for resume, before
+   even looking up the resumable run) -- and raise `RunAlreadyInProgress`
+   if it's already held, wrapping the rest of each function's body in a
+   `finally: dbc.release_run_lock()` so the lock releases on every exit
+   path, crash included.
+3. **`reconcile_orphaned_runs()` now requires the lock first.** Holding it
+   IS the proof no live run exists (a live run -- bot or CLI -- would
+   already hold it). If it can't acquire, it logs a warning and leaves
+   every `wd_runs` row untouched rather than reconciling out from under a
+   process that's still working, then releases the lock again afterward
+   (it's a liveness check, not a run) so the lock is free for whatever
+   starts next.
+4. **`bot.py`** keeps `_busy` as a fast in-process early-exit (documented as
+   such now, not the real guard) and catches `RunAlreadyInProgress`
+   distinctly in both `_run_scan_job` and `_resume_job` -- sent as a plain
+   message, never labeled `tg.finish("crashed")`, since nothing crashed.
+   **`cli.py`** catches it the same way and prints it to stderr plainly,
+   exit code 1, no traceback.
+
+**No real Postgres is reachable in this environment** -- confirmed directly
+(not assumed): `DATABASE_URL` is unset, and connecting to the fallback
+default (`postgresql://postgres:postgres@localhost:5432/outreach`) fails
+authentication immediately. All lock tests run against a fake pool that
+tracks a single shared `held` flag plus `getconn`/`putconn` checkout
+bookkeeping, mirroring `pg_try_advisory_lock`/`pg_advisory_unlock`'s
+semantics as closely as a fake reasonably can. This exercises wd_dbc's own
+connection-handling code for real (a bug in the getconn/putconn bookkeeping
+itself would show up), but it is **not verified against a real Postgres
+server** -- said here plainly, not implied.
+
+New tests:
+- `tests/test_wd_dbc.py` (+12): concurrent acquire fails the second caller
+  (a fake pool with `held=True` simulating another session); acquire is
+  idempotent within one process; release lets the next caller through;
+  release-without-acquire is a no-op; `reconcile_orphaned_runs()` is a
+  complete no-op while the lock is held (asserted by making `conn` fail the
+  test if it's ever called at all); reconcile acquires-does-the-update-
+  releases when nothing is live. The two existing reconcile tests
+  (row-marking, zero-count) were updated to mock `acquire_run_lock`/
+  `release_run_lock` directly, decoupling "does the UPDATE SQL work" from
+  "does the lock work" -- each tested once, not the same thing twice.
+- `tests/test_run_lock.py` (new, +8): `run()`, `run_single_firm()`, and
+  `run_resume()` each raise `RunAlreadyInProgress` when the lock is
+  unavailable, and each does so BEFORE touching `wd_runs` at all (proven by
+  asserting `create_wd_run`/`latest_resumable_run` were never called); each
+  releases the lock after a normal completion; `run()` releases the lock
+  even when the run body raises; `cli.main()` prints
+  `RunAlreadyInProgress` to stderr with no traceback.
+- `tests/test_bot_dispatch.py` (+2): `/scan` and `/resume` both report
+  `RunAlreadyInProgress` as a plain message, distinct from a crash --
+  `tg.finish` is never called with `"crashed"` for this case.
+- 3 pre-existing tests in `test_recency_window.py` that call
+  `signal_pipeline.run()` directly needed `acquire_run_lock`/
+  `release_run_lock` mocked too, once the lock check was added -- without
+  it they were making REAL (failing) network connection attempts to
+  Postgres, which is what surfaced as a 55-second test run before the fix
+  (each timing out against the pool's 10s connect timeout).
+
+Tests: 170 passed (delta +17: +7 new in test_wd_dbc.py -- 5 lock tests plus
+2 reconcile-and-the-lock tests, on top of the existing 5 which were fixed to
+mock the lock rather than hit real Postgres; +8 in the new
+tests/test_run_lock.py; +2 in test_bot_dispatch.py). 0 failures.
+
+Not started: prompt 3, per instruction to stop here.

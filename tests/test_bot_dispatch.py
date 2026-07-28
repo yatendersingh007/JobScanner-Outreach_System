@@ -529,3 +529,35 @@ def test_startup_refuses_without_authorized_users(monkeypatch, wire):
     monkeypatch.setattr(bot.config, "AUTHORIZED_USER_IDS", [])
     with pytest.raises(SystemExit):
         bot._startup()
+
+
+# ---------------------------------------------------------------------------
+# RunAlreadyInProgress: the real cross-front-door guard (a Postgres advisory
+# lock, not _busy) surfacing through the bot. _busy only ever sees this one
+# process; this is what actually fires when the CLI (a separate process) or
+# another bot instance is mid-run. Must read distinctly from a genuine crash
+# -- no "Crashed." label, no CRASHED wording.
+# ---------------------------------------------------------------------------
+def test_scan_reports_run_already_in_progress_distinctly_from_a_crash(monkeypatch, wire):
+    def _boom(**kw):
+        raise bot.dbc.RunAlreadyInProgress("Another Workflow D run is already in progress.")
+
+    monkeypatch.setattr(bot, "run_scan", _boom)
+
+    bot._handle_scan("")
+
+    assert wire.sent == ["Workflow D run started.",
+                         "Another Workflow D run is already in progress."]
+    assert wire.finished == []  # never called tg.finish("crashed") for this
+
+
+def test_resume_reports_run_already_in_progress_distinctly_from_a_crash(monkeypatch, wire):
+    def _boom(**kw):
+        raise bot.dbc.RunAlreadyInProgress("Another Workflow D run is already in progress.")
+
+    monkeypatch.setattr(bot, "run_resume", _boom)
+
+    bot._handle_resume()
+
+    assert "Another Workflow D run is already in progress." in wire.sent
+    assert wire.finished == []

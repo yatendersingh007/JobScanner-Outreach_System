@@ -374,85 +374,98 @@ def run(mode: str = "manual", progress: Progress = _noop,
     window = config.REGATE_WINDOW_DAYS
     days = _resolve_recency_days(recency_days)
 
-    run_row = dbc.create_wd_run(mode, recency_days_used=days)
-    result = RunResult(run_id=run_row["id"], mode=mode, recency_days_used=days, dry=dry)
-    if days > 1:
-        progress(
-            f"Window: last {days} days (catch-up). Postings older than {days} "
-            "days that a prior run already recorded are not recoverable by "
-            "widening further."
+    # The Postgres advisory lock, not _busy (bot.py's in-process guard), is
+    # the real cross-front-door guard: src/cli.py and src/bot.py are two
+    # separate processes that can both reach this function at once. Taken
+    # before the wd_runs row even exists, so a losing caller never creates
+    # a row for a run that will not happen.
+    if not dbc.acquire_run_lock():
+        raise dbc.RunAlreadyInProgress(
+            "Another Workflow D run is already in progress (CLI or bot). "
+            "Wait for it to finish, or cancel it, before starting another."
         )
     try:
-        jobs, cfg, csv_path = scan(recency_days=days, progress=progress)
-        # scanner/pipeline.run returns only what survived its own filters, so
-        # raw and kept are the same number here. Raw counts live in the
-        # scanner's own log line.
-        result.postings_raw = len(jobs)
-        result.postings_kept = len(jobs)
-        result.csv_path = csv_path
-        result.connector_health = connector_health(jobs, config.EXPECTED_SOURCES)
+        run_row = dbc.create_wd_run(mode, recency_days_used=days)
+        result = RunResult(run_id=run_row["id"], mode=mode, recency_days_used=days, dry=dry)
+        if days > 1:
+            progress(
+                f"Window: last {days} days (catch-up). Postings older than {days} "
+                "days that a prior run already recorded are not recoverable by "
+                "widening further."
+            )
+        try:
+            jobs, cfg, csv_path = scan(recency_days=days, progress=progress)
+            # scanner/pipeline.run returns only what survived its own filters, so
+            # raw and kept are the same number here. Raw counts live in the
+            # scanner's own log line.
+            result.postings_raw = len(jobs)
+            result.postings_kept = len(jobs)
+            result.csv_path = csv_path
+            result.connector_health = connector_health(jobs, config.EXPECTED_SOURCES)
 
-        blocklist = staffing_blocklist(cfg)
-        groups, staffing, uncategorized = group_by_company(jobs, blocklist)
-        result.skipped_staffing = staffing
-        result.skipped_uncategorized = uncategorized
-        result.groups = len(groups)
-        progress(f"{len(groups)} companies after grouping "
-                 f"({len(staffing)} staffing, {uncategorized} uncategorized dropped).")
+            blocklist = staffing_blocklist(cfg)
+            groups, staffing, uncategorized = group_by_company(jobs, blocklist)
+            result.skipped_staffing = staffing
+            result.skipped_uncategorized = uncategorized
+            result.groups = len(groups)
+            progress(f"{len(groups)} companies after grouping "
+                     f"({len(staffing)} staffing, {uncategorized} uncategorized dropped).")
 
-        # Cache pass first, on every group, before spending anything. Cheap,
-        # and it decides how much of the cap is actually needed.
-        to_gate: list[FirmGroup] = []
-        for g in groups:
-            cached = dbc.verdict_cache_lookup(g.firm_name, window)
-            if cached:
-                firm = _reuse_cached(result.run_id, g, cached)
-                result.skipped_known.append(firm)
-                if cached["icp_status"] == "qualified":
-                    result.qualified.append(firm)
+            # Cache pass first, on every group, before spending anything. Cheap,
+            # and it decides how much of the cap is actually needed.
+            to_gate: list[FirmGroup] = []
+            for g in groups:
+                cached = dbc.verdict_cache_lookup(g.firm_name, window)
+                if cached:
+                    firm = _reuse_cached(result.run_id, g, cached)
+                    result.skipped_known.append(firm)
+                    if cached["icp_status"] == "qualified":
+                        result.qualified.append(firm)
+                    else:
+                        result.disqualified.append(firm)
                 else:
-                    result.disqualified.append(firm)
-            else:
-                to_gate.append(g)
+                    to_gate.append(g)
 
-        progress(f"{len(result.skipped_known)} known firms reused from cache, "
-                 f"{len(to_gate)} new to gate (cap {cap}).")
+            progress(f"{len(result.skipped_known)} known firms reused from cache, "
+                     f"{len(to_gate)} new to gate (cap {cap}).")
 
-        dbc.enqueue(result.run_id, [(g.firm_key, g.firm_name) for g in to_gate])
+            dbc.enqueue(result.run_id, [(g.firm_key, g.firm_name) for g in to_gate])
 
-        for i, g in enumerate(to_gate):
-            if dbc.cancel_requested(result.run_id):
-                result.cancelled = True
-                result.deferred.extend(to_gate[i:])
-                break
-            if i >= cap:
-                result.deferred.append(g)
-                continue
-            progress(f"Gating {g.firm_name} ({i + 1}/{min(cap, len(to_gate))})...")
-            firm = gate_group(result.run_id, g, progress)
-            result.tavily_searches += firm.pop("_search_calls", 0) or 0
-            result.llm_tokens += firm.pop("_tokens_used", 0) or 0
-            result.research_cost_usd += float(firm.pop("_research_cost_usd", 0) or 0)
-            {"qualified": result.qualified,
-             "disqualified": result.disqualified,
-             "parked": result.parked}.get(firm["icp_status"], result.parked).append(firm)
+            for i, g in enumerate(to_gate):
+                if dbc.cancel_requested(result.run_id):
+                    result.cancelled = True
+                    result.deferred.extend(to_gate[i:])
+                    break
+                if i >= cap:
+                    result.deferred.append(g)
+                    continue
+                progress(f"Gating {g.firm_name} ({i + 1}/{min(cap, len(to_gate))})...")
+                firm = gate_group(result.run_id, g, progress)
+                result.tavily_searches += firm.pop("_search_calls", 0) or 0
+                result.llm_tokens += firm.pop("_tokens_used", 0) or 0
+                result.research_cost_usd += float(firm.pop("_research_cost_usd", 0) or 0)
+                {"qualified": result.qualified,
+                 "disqualified": result.disqualified,
+                 "parked": result.parked}.get(firm["icp_status"], result.parked).append(firm)
 
-        _apply_draft_cap_fields(result)
-        dbc.update_wd_run(
-            result.run_id,
-            status="cancelled" if result.cancelled else "done",
-            finished_at=_now(),
-            postings_kept=result.postings_kept,
-            companies_grouped=result.groups,
-            companies_gated=len(result.qualified) + len(result.disqualified) + len(result.parked),
-            csv_path=result.csv_path,
-            tavily_searches=result.tavily_searches,
-            llm_tokens=result.llm_tokens,
-            research_cost_usd=result.research_cost_usd,
-        )
-    except Exception as e:
-        log.exception("Workflow D run %s crashed", result.run_id)
-        dbc.update_wd_run(result.run_id, status="crashed", finished_at=_now(),
-                          notes=f"{type(e).__name__}: {e}")
-        raise
-    return result
+            _apply_draft_cap_fields(result)
+            dbc.update_wd_run(
+                result.run_id,
+                status="cancelled" if result.cancelled else "done",
+                finished_at=_now(),
+                postings_kept=result.postings_kept,
+                companies_grouped=result.groups,
+                companies_gated=len(result.qualified) + len(result.disqualified) + len(result.parked),
+                csv_path=result.csv_path,
+                tavily_searches=result.tavily_searches,
+                llm_tokens=result.llm_tokens,
+                research_cost_usd=result.research_cost_usd,
+            )
+        except Exception as e:
+            log.exception("Workflow D run %s crashed", result.run_id)
+            dbc.update_wd_run(result.run_id, status="crashed", finished_at=_now(),
+                              notes=f"{type(e).__name__}: {e}")
+            raise
+        return result
+    finally:
+        dbc.release_run_lock()

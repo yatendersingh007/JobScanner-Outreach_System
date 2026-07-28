@@ -100,32 +100,45 @@ def run_single_firm(mode: str, firm_name: str, dry: bool = False,
     the scanner entirely. Reuses signal_pipeline.gate_group() and its dbc
     helpers unchanged -- this is new orchestration on top of them, not a
     change to signal_pipeline.py's own grouping/cache/gate logic (DO NOT
-    CHANGE signal_pipeline.py, prompt 2's scope)."""
+    CHANGE signal_pipeline.py, prompt 2's scope).
+
+    Takes the same Postgres advisory run lock signal_pipeline.run() does,
+    before creating the wd_runs row -- this is a second front door into the
+    same gate machinery and must be covered by the same single mechanism,
+    not a second one."""
     dbc = signal_pipeline.dbc
-    run_row = dbc.create_wd_run(mode, recency_days_used=1)
-    result = signal_pipeline.RunResult(run_id=run_row["id"], mode=mode,
-                                       recency_days_used=1, dry=dry, groups=1)
-    group = signal_pipeline.FirmGroup(firm_name=firm_name, firm_key=dbc.firm_key(firm_name))
-    progress(f"Gating {firm_name} (single-firm override, scanner skipped)...")
-    firm = signal_pipeline.gate_group(result.run_id, group, progress)
-    result.tavily_searches += firm.pop("_search_calls", 0) or 0
-    result.llm_tokens += firm.pop("_tokens_used", 0) or 0
-    result.research_cost_usd += float(firm.pop("_research_cost_usd", 0) or 0)
-    {"qualified": result.qualified,
-     "disqualified": result.disqualified,
-     "parked": result.parked}.get(firm["icp_status"], result.parked).append(firm)
-    signal_pipeline._apply_draft_cap_fields(result)
-    dbc.update_wd_run(
-        result.run_id,
-        status="done",
-        finished_at=signal_pipeline._now(),
-        companies_grouped=1,
-        companies_gated=len(result.qualified) + len(result.disqualified) + len(result.parked),
-        tavily_searches=result.tavily_searches,
-        llm_tokens=result.llm_tokens,
-        research_cost_usd=result.research_cost_usd,
-    )
-    return result
+    if not dbc.acquire_run_lock():
+        raise dbc.RunAlreadyInProgress(
+            "Another Workflow D run is already in progress (CLI or bot). "
+            "Wait for it to finish, or cancel it, before starting another."
+        )
+    try:
+        run_row = dbc.create_wd_run(mode, recency_days_used=1)
+        result = signal_pipeline.RunResult(run_id=run_row["id"], mode=mode,
+                                           recency_days_used=1, dry=dry, groups=1)
+        group = signal_pipeline.FirmGroup(firm_name=firm_name, firm_key=dbc.firm_key(firm_name))
+        progress(f"Gating {firm_name} (single-firm override, scanner skipped)...")
+        firm = signal_pipeline.gate_group(result.run_id, group, progress)
+        result.tavily_searches += firm.pop("_search_calls", 0) or 0
+        result.llm_tokens += firm.pop("_tokens_used", 0) or 0
+        result.research_cost_usd += float(firm.pop("_research_cost_usd", 0) or 0)
+        {"qualified": result.qualified,
+         "disqualified": result.disqualified,
+         "parked": result.parked}.get(firm["icp_status"], result.parked).append(firm)
+        signal_pipeline._apply_draft_cap_fields(result)
+        dbc.update_wd_run(
+            result.run_id,
+            status="done",
+            finished_at=signal_pipeline._now(),
+            companies_grouped=1,
+            companies_gated=len(result.qualified) + len(result.disqualified) + len(result.parked),
+            tavily_searches=result.tavily_searches,
+            llm_tokens=result.llm_tokens,
+            research_cost_usd=result.research_cost_usd,
+        )
+        return result
+    finally:
+        dbc.release_run_lock()
 
 
 def run_resume(dry: bool = False, progress=tg.progress):
@@ -136,58 +149,69 @@ def run_resume(dry: bool = False, progress=tg.progress):
     now, since signal_pipeline.run() itself only ever iterates its own
     in-memory `to_gate` list, not the queue. Returns None if there is
     nothing resumable.
-    """
+
+    Takes the same Postgres advisory run lock signal_pipeline.run() does,
+    before touching the resumable run at all -- a third front door into the
+    same gate machinery, covered by the same single mechanism."""
     dbc = signal_pipeline.dbc
-    run = dbc.latest_resumable_run()
-    if run is None:
-        return None
-    run_id = run["id"]
-    dbc.update_wd_run(run_id, status="running", cancel_requested_at=None)
-    result = signal_pipeline.RunResult(
-        run_id=run_id, mode="resume",
-        recency_days_used=run.get("recency_days_used") or 1, dry=dry,
-    )
-    # Firms this run already decided before it crashed/was cancelled count
-    # toward the summary; none of them are re-gated or re-drafted.
-    for firm in dbc.firms_for_run(run_id):
-        bucket = {"qualified": result.qualified, "disqualified": result.disqualified,
-                  "parked": result.parked}.get(firm.get("icp_status"))
-        if bucket is not None:
-            bucket.append(firm)
-    result.groups = len(result.qualified) + len(result.disqualified) + len(result.parked)
+    if not dbc.acquire_run_lock():
+        raise dbc.RunAlreadyInProgress(
+            "Another Workflow D run is already in progress (CLI or bot). "
+            "Wait for it to finish, or cancel it, before starting another."
+        )
+    try:
+        run = dbc.latest_resumable_run()
+        if run is None:
+            return None
+        run_id = run["id"]
+        dbc.update_wd_run(run_id, status="running", cancel_requested_at=None)
+        result = signal_pipeline.RunResult(
+            run_id=run_id, mode="resume",
+            recency_days_used=run.get("recency_days_used") or 1, dry=dry,
+        )
+        # Firms this run already decided before it crashed/was cancelled count
+        # toward the summary; none of them are re-gated or re-drafted.
+        for firm in dbc.firms_for_run(run_id):
+            bucket = {"qualified": result.qualified, "disqualified": result.disqualified,
+                      "parked": result.parked}.get(firm.get("icp_status"))
+            if bucket is not None:
+                bucket.append(firm)
+        result.groups = len(result.qualified) + len(result.disqualified) + len(result.parked)
 
-    cap = config.GATE_CAP_PER_RUN
-    # A generous limit, not an unbounded query -- effectively "all pending
-    # rows for this run," which then gets split at `cap` below so the cap
-    # guard still applies to a resumed run exactly as it does to a fresh one.
-    all_pending = dbc.next_pending(run_id, limit=cap + 10_000)
-    to_process, still_pending = all_pending[:cap], all_pending[cap:]
+        cap = config.GATE_CAP_PER_RUN
+        # A generous limit, not an unbounded query -- effectively "all pending
+        # rows for this run," which then gets split at `cap` below so the cap
+        # guard still applies to a resumed run exactly as it does to a fresh one.
+        all_pending = dbc.next_pending(run_id, limit=cap + 10_000)
+        to_process, still_pending = all_pending[:cap], all_pending[cap:]
 
-    for i, q in enumerate(to_process):
-        if dbc.cancel_requested(run_id):
-            result.cancelled = True
-            still_pending = to_process[i:] + still_pending
-            break
-        progress(f"Resuming: gating {q['firm_name']} ({i + 1}/{len(to_process)})...")
-        group = signal_pipeline.FirmGroup(firm_name=q["firm_name"], firm_key=q["firm_key"])
-        firm = signal_pipeline.gate_group(run_id, group, progress)
-        dbc.set_queue_status(q["id"], "done", firm_id=firm["id"])
-        result.groups += 1
-        result.tavily_searches += firm.pop("_search_calls", 0) or 0
-        result.llm_tokens += firm.pop("_tokens_used", 0) or 0
-        result.research_cost_usd += float(firm.pop("_research_cost_usd", 0) or 0)
-        {"qualified": result.qualified, "disqualified": result.disqualified,
-         "parked": result.parked}.get(firm["icp_status"], result.parked).append(firm)
+        for i, q in enumerate(to_process):
+            if dbc.cancel_requested(run_id):
+                result.cancelled = True
+                still_pending = to_process[i:] + still_pending
+                break
+            progress(f"Resuming: gating {q['firm_name']} ({i + 1}/{len(to_process)})...")
+            group = signal_pipeline.FirmGroup(firm_name=q["firm_name"], firm_key=q["firm_key"])
+            firm = signal_pipeline.gate_group(run_id, group, progress)
+            dbc.set_queue_status(q["id"], "done", firm_id=firm["id"])
+            result.groups += 1
+            result.tavily_searches += firm.pop("_search_calls", 0) or 0
+            result.llm_tokens += firm.pop("_tokens_used", 0) or 0
+            result.research_cost_usd += float(firm.pop("_research_cost_usd", 0) or 0)
+            {"qualified": result.qualified, "disqualified": result.disqualified,
+             "parked": result.parked}.get(firm["icp_status"], result.parked).append(firm)
 
-    result.deferred = [SimpleNamespace(firm_name=q["firm_name"]) for q in still_pending]
-    signal_pipeline._apply_draft_cap_fields(result)
-    dbc.update_wd_run(
-        run_id,
-        status="cancelled" if result.cancelled else "done",
-        finished_at=signal_pipeline._now(),
-        companies_gated=len(result.qualified) + len(result.disqualified) + len(result.parked),
-        tavily_searches=result.tavily_searches,
-        llm_tokens=result.llm_tokens,
-        research_cost_usd=result.research_cost_usd,
-    )
-    return result
+        result.deferred = [SimpleNamespace(firm_name=q["firm_name"]) for q in still_pending]
+        signal_pipeline._apply_draft_cap_fields(result)
+        dbc.update_wd_run(
+            run_id,
+            status="cancelled" if result.cancelled else "done",
+            finished_at=signal_pipeline._now(),
+            companies_gated=len(result.qualified) + len(result.disqualified) + len(result.parked),
+            tavily_searches=result.tavily_searches,
+            llm_tokens=result.llm_tokens,
+            research_cost_usd=result.research_cost_usd,
+        )
+        return result
+    finally:
+        dbc.release_run_lock()

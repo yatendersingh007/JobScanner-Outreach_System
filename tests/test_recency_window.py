@@ -171,6 +171,8 @@ def test_run_persists_recency_days_used(monkeypatch):
 
     monkeypatch.setattr(signal_pipeline.dbc, "create_wd_run", fake_create_wd_run)
     monkeypatch.setattr(signal_pipeline.dbc, "update_wd_run", lambda *a, **k: None)
+    monkeypatch.setattr(signal_pipeline.dbc, "acquire_run_lock", lambda: True)
+    monkeypatch.setattr(signal_pipeline.dbc, "release_run_lock", lambda: None)
     monkeypatch.setattr(signal_pipeline, "scan", fake_scan)
 
     result = signal_pipeline.run(mode="manual", recency_days=7)
@@ -189,6 +191,8 @@ def test_run_default_recency_days_used_is_one(monkeypatch):
 
     monkeypatch.setattr(signal_pipeline.dbc, "create_wd_run", fake_create_wd_run)
     monkeypatch.setattr(signal_pipeline.dbc, "update_wd_run", lambda *a, **k: None)
+    monkeypatch.setattr(signal_pipeline.dbc, "acquire_run_lock", lambda: True)
+    monkeypatch.setattr(signal_pipeline.dbc, "release_run_lock", lambda: None)
     monkeypatch.setattr(
         signal_pipeline, "scan",
         lambda recency_days, progress: ([], SimpleNamespace(poc_blocklist=[]), "jobs.csv"),
@@ -239,6 +243,8 @@ def test_run_sets_draft_cap_fields_on_its_result(monkeypatch):
     monkeypatch.setattr(signal_pipeline.dbc, "create_wd_run",
                         lambda mode, recency_days_used=1: {"id": 1})
     monkeypatch.setattr(signal_pipeline.dbc, "update_wd_run", lambda *a, **k: None)
+    monkeypatch.setattr(signal_pipeline.dbc, "acquire_run_lock", lambda: True)
+    monkeypatch.setattr(signal_pipeline.dbc, "release_run_lock", lambda: None)
     monkeypatch.setattr(
         signal_pipeline, "scan",
         lambda recency_days, progress: ([], SimpleNamespace(poc_blocklist=[]), "jobs.csv"),
