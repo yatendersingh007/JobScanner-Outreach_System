@@ -1,0 +1,23 @@
+[Unit]
+Description=Workflow D (signal-driven outreach) daily scan
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=outreach
+Group=outreach
+WorkingDirectory=/opt/workflow-d
+EnvironmentFile=/opt/workflow-d/.env
+# Unbuffered so journalctl shows progress live rather than only at exit.
+ExecStart=/opt/workflow-d/.venv/bin/python -u -m src.daily_run
+# A oneshot gets no Restart=always. A failed 9 AM run must NOT retry in a
+# loop: every attempt spends JSearch quota, TinyFish steps and Tavily
+# searches. The Telegram crash notification is the retry trigger, and a
+# human decides whether to spend again.
+TimeoutStartSec=3600
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

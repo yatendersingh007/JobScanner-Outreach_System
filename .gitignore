@@ -1,0 +1,8 @@
+﻿.env
+token.json
+credentials.json
+*.db
+output/
+.venv/
+__pycache__/
+connections.csv
