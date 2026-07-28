@@ -201,6 +201,56 @@ def test_run_default_recency_days_used_is_one(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# drafts_planned / drafts_over_cap: computed by the pipeline (fix before
+# prompt 3), not recomputed by bot.py or the CLI. See test_bot_dispatch.py's
+# draft-intent tests for confirmation that bot.py only reads these fields.
+# ---------------------------------------------------------------------------
+def test_apply_draft_cap_fields_under_cap():
+    result = RunResult(run_id=1)
+    result.qualified = [{"id": i} for i in range(3)]
+
+    signal_pipeline._apply_draft_cap_fields(result)
+
+    assert result.drafts_planned == 3
+    assert result.drafts_over_cap == 0
+
+
+def test_apply_draft_cap_fields_over_cap(monkeypatch):
+    monkeypatch.setattr(config, "DRAFT_CAP_PER_RUN", 2)
+    result = RunResult(run_id=1)
+    result.qualified = [{"id": i} for i in range(5)]
+
+    signal_pipeline._apply_draft_cap_fields(result)
+
+    assert result.drafts_planned == 2
+    assert result.drafts_over_cap == 3
+
+
+def test_apply_draft_cap_fields_zero_qualified():
+    result = RunResult(run_id=1)
+
+    signal_pipeline._apply_draft_cap_fields(result)
+
+    assert result.drafts_planned == 0
+    assert result.drafts_over_cap == 0
+
+
+def test_run_sets_draft_cap_fields_on_its_result(monkeypatch):
+    monkeypatch.setattr(signal_pipeline.dbc, "create_wd_run",
+                        lambda mode, recency_days_used=1: {"id": 1})
+    monkeypatch.setattr(signal_pipeline.dbc, "update_wd_run", lambda *a, **k: None)
+    monkeypatch.setattr(
+        signal_pipeline, "scan",
+        lambda recency_days, progress: ([], SimpleNamespace(poc_blocklist=[]), "jobs.csv"),
+    )
+
+    result = signal_pipeline.run(mode="manual")
+
+    assert result.drafts_planned == 0
+    assert result.drafts_over_cap == 0
+
+
+# ---------------------------------------------------------------------------
 # The catch-up window appears in the run summary when N > 1, not when N == 1.
 # Constructed the same way signal_pipeline.run() constructs it -- keyword
 # arguments to RunResult(), not attributes set after the fact -- since mode

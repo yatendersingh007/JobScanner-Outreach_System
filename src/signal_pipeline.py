@@ -103,6 +103,12 @@ class RunResult:
     research_cost_usd: float = 0.0
     csv_path: str = ""
     cancelled: bool = False
+    # Set by _apply_draft_cap_fields() once qualified/ is final, not by any
+    # caller: how many of `qualified` fit under DRAFT_CAP_PER_RUN, and how
+    # many don't. Computed once, here, so bot.py and the CLI only ever read
+    # it rather than each recomputing their own copy of the same arithmetic.
+    drafts_planned: int = 0
+    drafts_over_cap: int = 0
 
 
 _WS_RE = re.compile(r"\s+")
@@ -348,6 +354,16 @@ def _resolve_recency_days(days: Optional[int]) -> int:
     return resolved
 
 
+def _apply_draft_cap_fields(result: RunResult) -> None:
+    """Sets drafts_planned/drafts_over_cap from the FINAL qualified list and
+    the current DRAFT_CAP_PER_RUN. Computed once, here -- the one place that
+    knows both numbers -- so callers (bot.py, the CLI) only ever read it
+    rather than each recomputing the same min()/max() themselves."""
+    n_qualified = len(result.qualified)
+    result.drafts_planned = min(n_qualified, config.DRAFT_CAP_PER_RUN)
+    result.drafts_over_cap = max(0, n_qualified - config.DRAFT_CAP_PER_RUN)
+
+
 # ---------------------------------------------------------------------------
 # The run
 # ---------------------------------------------------------------------------
@@ -421,6 +437,7 @@ def run(mode: str = "manual", progress: Progress = _noop,
              "disqualified": result.disqualified,
              "parked": result.parked}.get(firm["icp_status"], result.parked).append(firm)
 
+        _apply_draft_cap_fields(result)
         dbc.update_wd_run(
             result.run_id,
             status="cancelled" if result.cancelled else "done",

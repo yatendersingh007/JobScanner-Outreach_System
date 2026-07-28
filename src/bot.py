@@ -14,8 +14,10 @@ pipeline, not here.
 """
 from __future__ import annotations
 
+import logging
 import re
 import threading
+import time
 from typing import Optional
 
 import requests
@@ -24,7 +26,9 @@ from lib_referral import config as gate_config
 from . import wd_config as config, wd_dbc as dbc, wd_telegram as tg
 from .run_scan import run_resume, run_scan, run_single_firm, summarize
 
+log = logging.getLogger("workflow-d.bot")
 _busy = threading.Lock()
+_POLL_ERROR_BACKOFF_SEC = 5
 
 # ---------------------------------------------------------------------------
 # Parsing helpers. Independently reimplemented and empirically compared
@@ -186,14 +190,14 @@ def _run_scan_job(parsed: dict) -> None:
         # Prompt 2 step 2a: post the draft/spend INTENT right after gating,
         # before any attempt to draft. Information, not a question -- there
         # is no confirm gate. /cancel is there if the number looks wrong;
-        # DRAFT_CAP_PER_RUN stops it regardless.
+        # DRAFT_CAP_PER_RUN stops it regardless. The arithmetic itself
+        # (drafts_planned/drafts_over_cap) is computed by the pipeline, not
+        # here -- bot.py only reads and formats it.
         if not dry and result.qualified:
-            n_q = len(result.qualified)
-            n_draft = min(n_q, config.DRAFT_CAP_PER_RUN)
-            n_over = max(0, n_q - config.DRAFT_CAP_PER_RUN)
-            over_note = f", {n_over} over cap and parked for /resume" if n_over else ""
+            over_note = (f", {result.drafts_over_cap} over cap and parked for /resume"
+                        if result.drafts_over_cap else "")
             tg.send(
-                f"{n_q} qualified. {n_draft} would be drafted "
+                f"{len(result.qualified)} qualified. {result.drafts_planned} would be drafted "
                 f"(DRAFT_CAP_PER_RUN={config.DRAFT_CAP_PER_RUN}){over_note}. "
                 "Drafting is not built yet (prompts 3-4), so this run stops after "
                 "gating. /cancel would have stopped it here if this number looked wrong."
@@ -278,6 +282,9 @@ def _handle_qualify(arg: str) -> None:
     if not row:
         tg.send(f'No PARKED firm named "{firm}" on record. /qualify only rescues parked firms.')
         return
+    # Input validation against the gate's own thresholds, not a gate verdict:
+    # an operator override still has to fall inside the same $200M-$2B band
+    # icp_gate.py itself enforces. Do not move this on principle.
     in_band = gate_config.AUM_MIN_USD <= aum <= gate_config.AUM_MAX_USD
     if not in_band:
         tg.send(
@@ -434,11 +441,39 @@ def _process_updates(updates: list[dict], allowed: set[str]) -> Optional[int]:
     return next_offset
 
 
-def run_bot() -> None:
+def _poll_once(offset: Optional[int], allowed: set[str]) -> Optional[int]:
+    """One iteration of the poll loop, factored out of run_bot() so the
+    retry/backoff behavior is testable without a live token or the real
+    infinite loop. On a transient network error, log it and back off briefly
+    rather than retrying in a tight loop or letting the whole process die --
+    returns the offset UNCHANGED so the next iteration re-fetches from where
+    it left off."""
+    try:
+        updates = get_updates(offset)
+    except requests.RequestException as e:
+        log.warning("get_updates failed, retrying in %ss: %s", _POLL_ERROR_BACKOFF_SEC, e)
+        time.sleep(_POLL_ERROR_BACKOFF_SEC)
+        return offset
+    next_offset = _process_updates(updates, allowed)
+    return next_offset if next_offset is not None else offset
+
+
+def _startup() -> tuple[Optional[int], set[str]]:
+    """Everything run_bot() does before its first poll, factored out so the
+    ordering is actually testable rather than just read off the source.
+    workflow-d-bot.service has Restart=always: if the process died mid-run,
+    the OLD run's wd_runs row is stuck at status='running' forever with no
+    process behind it. Reconciling here, before anything else, means
+    /cancel can never find and "successfully" cancel a dead run."""
     if not config.TELEGRAM_BOT_TOKEN_D:
         raise SystemExit("Refusing to start: TELEGRAM_BOT_TOKEN_D is empty in .env")
     if not config.AUTHORIZED_USER_IDS:
         raise SystemExit("Refusing to start: AUTHORIZED_USER_IDS is empty in .env")
+
+    reconciled = dbc.reconcile_orphaned_runs()
+    if reconciled:
+        tg.send(f"Startup: reconciled {reconciled} orphaned run(s) stuck at "
+                "'running' from a previous crash. Marked crashed.")
 
     allowed = set(config.AUTHORIZED_USER_IDS)
     offset: Optional[int] = None
@@ -446,11 +481,13 @@ def run_bot() -> None:
     if backlog:
         offset = backlog[-1]["update_id"] + 1
     tg.send("Workflow D bot online.\n\n" + _help_text())
+    return offset, allowed
 
+
+def run_bot() -> None:
+    offset, allowed = _startup()
     while True:
-        next_offset = _process_updates(get_updates(offset), allowed)
-        if next_offset is not None:
-            offset = next_offset
+        offset = _poll_once(offset, allowed)
 
 
 if __name__ == "__main__":

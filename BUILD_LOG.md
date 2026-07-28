@@ -398,3 +398,54 @@ Open for next session:
   referral-system's version does after qualifying a firm has no equivalent
   here yet — this build just marks the firm qualified and says so; prompts
   3-4 landing drafting is what makes that continuation meaningful.
+
+## Fixes before prompt 3 - 2026-07-28
+
+1. **Orphaned running runs.** `workflow-d-bot.service`'s `Restart=always`
+   means a crash mid-run leaves `wd_runs.status='running'` with no process
+   behind it, forever — `latest_running_run()` would find that stale row
+   and `/cancel` would flag a dead run and report success while changing
+   nothing. Added `wd_dbc.reconcile_orphaned_runs()`: marks every
+   `status='running'` row `crashed` with a note, returns the count. Called
+   from a new `bot._startup()` (factored out of `run_bot()` specifically so
+   the ordering is testable) before the first `get_updates` call, with a
+   Telegram notice when the count is nonzero. 2 tests in `test_wd_dbc.py`
+   (count + SQL text), 5 tests in `test_bot_dispatch.py` for `_startup()`
+   (reconcile-before-first-poll ordering, notified vs silent, refuses
+   without token/allowlist).
+2. **Draft-cap arithmetic moved out of bot.py.** `RunResult` gained
+   `drafts_planned`/`drafts_over_cap` fields, computed once by a new
+   `signal_pipeline._apply_draft_cap_fields(result)` — called at the end of
+   `run()`, `run_single_firm()`, and `run_resume()`, right before each of
+   their own `dbc.update_wd_run(...)` calls. `bot.py`'s `_run_scan_job` now
+   only reads `result.drafts_planned`/`result.drafts_over_cap`; it no
+   longer computes `min()`/`max()` against `DRAFT_CAP_PER_RUN` itself. This
+   was bot.py silently duplicating arithmetic prompt 3/4's real drafting
+   step will also need to compute — one place now, not two. 4 new tests in
+   `test_recency_window.py` for the arithmetic itself (under cap, over cap,
+   zero qualified, and that `run()` actually calls it); `test_bot_dispatch.py`'s
+   draft-intent test rewritten to set the fields directly on the mock
+   `RunResult` (a formatting test now, not an arithmetic test) plus a new
+   test proving bot.py does NOT recompute from `DRAFT_CAP_PER_RUN` itself
+   (changing it to 999 has no effect on an already-computed result).
+3. **`get_updates` wrapped with retry + backoff.** New `_poll_once(offset,
+   allowed)`, factored out of `run_bot()`'s loop: on
+   `requests.RequestException`, logs a warning, sleeps
+   `_POLL_ERROR_BACKOFF_SEC` (5s), and returns the offset UNCHANGED so the
+   next iteration re-fetches from the same place — a transient network
+   error no longer kills the process, and the retry is backed off, not a
+   tight loop. 4 tests: retries and backs off on a connection error, never
+   propagates the exception, processes updates normally on success, and
+   preserves the offset when there's nothing new.
+4. **AUM band check comment.** One line added above `_handle_qualify`'s
+   `in_band = gate_config.AUM_MIN_USD <= aum <= gate_config.AUM_MAX_USD`
+   stating plainly that this is input validation against the gate's own
+   thresholds, not a gate verdict, so it doesn't get moved on principle by
+   a future reader who assumes any AUM-band comparison belongs inside
+   `icp_gate.py`.
+
+Tests: 153 passed (delta +16: +2 wd_dbc, +4 signal_pipeline draft-cap,
++4 poll_once, +5 startup, net +1 on the rewritten draft-intent test).
+0 failures.
+
+Not started: prompt 3, per instruction to stop here.

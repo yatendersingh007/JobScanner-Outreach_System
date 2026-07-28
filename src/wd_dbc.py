@@ -128,6 +128,26 @@ def latest_running_run() -> Optional[dict]:
         return cur.fetchone()
 
 
+def reconcile_orphaned_runs() -> int:
+    """Bot startup: workflow-d-bot.service has Restart=always, so if the
+    process dies mid-run, systemd brings it back but the OLD run's wd_runs
+    row is still sitting at status='running' with no process behind it
+    forever -- latest_running_run() would find it and /cancel would flag a
+    dead run and report success while changing nothing. Marks every such
+    row 'crashed' with a note, and returns how many were reconciled so the
+    caller can report it."""
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "UPDATE wd_runs SET status='crashed', finished_at=now(), "
+                "notes='Reconciled at bot startup: process died mid-run (previous status was running)' "
+                "WHERE status='running' RETURNING id"
+            )
+            rows = cur.fetchall()
+        c.commit()
+    return len(rows)
+
+
 def request_run_cancellation(run_id: int) -> None:
     with conn() as c:
         with c.cursor() as cur:

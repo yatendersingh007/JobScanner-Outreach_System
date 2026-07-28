@@ -274,19 +274,47 @@ def test_scan_firm_calls_run_single_firm_not_run_scan(monkeypatch, wire):
 
 
 # ---------------------------------------------------------------------------
-# Draft-intent arithmetic (prompt 2 step 2a) -- the honest stand-in for
-# "drafts exactly N and parks the rest" until signal_drafting.py exists.
+# Draft-intent message (prompt 2 step 2a) -- the honest stand-in for "drafts
+# exactly N and parks the rest" until signal_drafting.py exists.
+#
+# The arithmetic itself (drafts_planned/drafts_over_cap) is computed by
+# signal_pipeline._apply_draft_cap_fields(), tested in test_recency_window.py
+# -- bot.py only READS and formats those two fields now, per the fix that
+# moved the computation out of bot.py (it was duplicating what the pipeline
+# would also need to compute for real once drafting exists). So here we set
+# them directly on the mock RunResult, the same way run_scan()/
+# run_single_firm()/run_resume() already would have, and check only the
+# formatting.
 # ---------------------------------------------------------------------------
-def test_draft_intent_message_over_cap_arithmetic(monkeypatch, wire):
-    monkeypatch.setattr(bot.config, "DRAFT_CAP_PER_RUN", 2)
+def test_draft_intent_message_formats_pipeline_computed_fields(monkeypatch, wire):
     result = RunResult(run_id=5, mode="manual", recency_days_used=1, dry=False)
     result.qualified = [_qualified_firm(f"Firm {i}", i) for i in range(5)]
+    result.drafts_planned = 2
+    result.drafts_over_cap = 3
     monkeypatch.setattr(bot, "run_scan", lambda **kw: result)
 
     bot._handle_scan("")
 
     combined = "\n".join(wire.sent)
     assert "5 qualified" in combined
+    assert "2 would be drafted" in combined
+    assert "3 over cap" in combined
+
+
+def test_draft_intent_message_does_not_compute_its_own_arithmetic(monkeypatch, wire):
+    """bot.py must not recompute drafts_planned/drafts_over_cap itself --
+    changing DRAFT_CAP_PER_RUN here must have NO effect on the message,
+    since only the pipeline-set fields on the result are read."""
+    monkeypatch.setattr(bot.config, "DRAFT_CAP_PER_RUN", 999)
+    result = RunResult(run_id=5, mode="manual", recency_days_used=1, dry=False)
+    result.qualified = [_qualified_firm(f"Firm {i}", i) for i in range(5)]
+    result.drafts_planned = 2
+    result.drafts_over_cap = 3
+    monkeypatch.setattr(bot, "run_scan", lambda **kw: result)
+
+    bot._handle_scan("")
+
+    combined = "\n".join(wire.sent)
     assert "2 would be drafted" in combined
     assert "3 over cap" in combined
 
@@ -397,3 +425,107 @@ def test_resume_sends_summary_when_something_resumed(monkeypatch, wire):
     monkeypatch.setattr(bot, "run_resume", lambda **kw: result)
     bot._handle_resume()
     assert any("Workflow D run 11: resume" in s for s in wire.sent)
+
+
+# ---------------------------------------------------------------------------
+# _poll_once: a transient network error must back off and retry, never spin
+# in a tight loop or kill the process. Tested directly, never run_bot()'s
+# real infinite loop (which needs a live token).
+# ---------------------------------------------------------------------------
+def test_poll_once_retries_after_transient_network_error(monkeypatch, wire):
+    def boom(offset, timeout=30):
+        raise bot.requests.ConnectionError("boom")
+
+    monkeypatch.setattr(bot, "get_updates", boom)
+    slept = []
+    monkeypatch.setattr(bot.time, "sleep", lambda s: slept.append(s))
+
+    result_offset = bot._poll_once(42, {"111"})
+
+    assert result_offset == 42  # unchanged -- re-fetch from the same place next time
+    assert slept == [bot._POLL_ERROR_BACKOFF_SEC]
+
+
+def test_poll_once_does_not_propagate_the_network_error(monkeypatch, wire):
+    monkeypatch.setattr(bot, "get_updates", lambda offset, timeout=30: (_ for _ in ()).throw(
+        bot.requests.Timeout("timed out")))
+    monkeypatch.setattr(bot.time, "sleep", lambda s: None)
+
+    bot._poll_once(1, {"111"})  # must not raise
+
+
+def test_poll_once_processes_updates_normally(monkeypatch, wire):
+    monkeypatch.setattr(
+        bot, "get_updates",
+        lambda offset, timeout=30: [{"update_id": 9, "message": {"from": {"id": 111}, "text": "/status"}}],
+    )
+    dispatched = []
+    monkeypatch.setattr(bot, "_dispatch_message", lambda msg: dispatched.append(msg))
+
+    result_offset = bot._poll_once(5, {"111"})
+
+    assert result_offset == 10
+    assert len(dispatched) == 1
+
+
+def test_poll_once_keeps_offset_when_no_updates(monkeypatch, wire):
+    monkeypatch.setattr(bot, "get_updates", lambda offset, timeout=30: [])
+    assert bot._poll_once(7, {"111"}) == 7
+
+
+# ---------------------------------------------------------------------------
+# _startup(): reconcile_orphaned_runs() itself is covered at the wd_dbc level
+# in tests/test_wd_dbc.py. Here we confirm the ORDERING run_bot() depends on
+# -- reconciliation happens before anything Telegram-facing, including the
+# very first get_updates call -- behaviorally, not by reading source text.
+# run_bot() itself still isn't called (real infinite loop, needs a live
+# token); _startup() is the part of it that actually can be.
+# ---------------------------------------------------------------------------
+def test_startup_reconciles_before_the_first_get_updates_call(monkeypatch, wire):
+    monkeypatch.setattr(bot.config, "TELEGRAM_BOT_TOKEN_D", "fake-token")
+    monkeypatch.setattr(bot.config, "AUTHORIZED_USER_IDS", ["111"])
+    order = []
+    monkeypatch.setattr(bot.dbc, "reconcile_orphaned_runs",
+                        lambda: (order.append("reconcile"), 0)[1])
+    monkeypatch.setattr(bot, "get_updates",
+                        lambda offset, timeout=30: (order.append("get_updates"), [])[1])
+
+    bot._startup()
+
+    assert order == ["reconcile", "get_updates"]
+
+
+def test_startup_notifies_when_runs_were_reconciled(monkeypatch, wire):
+    monkeypatch.setattr(bot.config, "TELEGRAM_BOT_TOKEN_D", "fake-token")
+    monkeypatch.setattr(bot.config, "AUTHORIZED_USER_IDS", ["111"])
+    monkeypatch.setattr(bot.dbc, "reconcile_orphaned_runs", lambda: 2)
+    monkeypatch.setattr(bot, "get_updates", lambda offset, timeout=30: [])
+
+    bot._startup()
+
+    assert any("reconciled 2 orphaned run" in s for s in wire.sent)
+
+
+def test_startup_silent_when_nothing_was_orphaned(monkeypatch, wire):
+    monkeypatch.setattr(bot.config, "TELEGRAM_BOT_TOKEN_D", "fake-token")
+    monkeypatch.setattr(bot.config, "AUTHORIZED_USER_IDS", ["111"])
+    monkeypatch.setattr(bot.dbc, "reconcile_orphaned_runs", lambda: 0)
+    monkeypatch.setattr(bot, "get_updates", lambda offset, timeout=30: [])
+
+    bot._startup()
+
+    assert not any("reconciled" in s for s in wire.sent)
+
+
+def test_startup_refuses_without_bot_token(monkeypatch, wire):
+    monkeypatch.setattr(bot.config, "TELEGRAM_BOT_TOKEN_D", "")
+    monkeypatch.setattr(bot.config, "AUTHORIZED_USER_IDS", ["111"])
+    with pytest.raises(SystemExit):
+        bot._startup()
+
+
+def test_startup_refuses_without_authorized_users(monkeypatch, wire):
+    monkeypatch.setattr(bot.config, "TELEGRAM_BOT_TOKEN_D", "fake-token")
+    monkeypatch.setattr(bot.config, "AUTHORIZED_USER_IDS", [])
+    with pytest.raises(SystemExit):
+        bot._startup()

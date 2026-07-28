@@ -73,3 +73,67 @@ def test_latest_running_run_picks_the_most_recent_running_row(monkeypatch):
     result = wd_dbc.latest_running_run()
 
     assert result["id"] == 5
+
+
+# ---------------------------------------------------------------------------
+# reconcile_orphaned_runs(): workflow-d-bot.service's Restart=always means a
+# crash mid-run leaves wd_runs.status='running' with no process behind it,
+# forever -- latest_running_run() would find that stale row and /cancel would
+# flag a dead run and report success while changing nothing. This must mark
+# every such row 'crashed' at bot startup, before the first poll.
+# ---------------------------------------------------------------------------
+class _FakeUpdateCursor:
+    def __init__(self, matching_ids):
+        self._matching_ids = matching_ids
+        self.executed_sql = None
+        self._result_rows = None
+
+    def execute(self, sql, params=None):
+        self.executed_sql = sql
+        if "status='running'" in sql or "status = 'running'" in sql:
+            self._result_rows = [{"id": i} for i in self._matching_ids]
+        else:
+            self._result_rows = []
+
+    def fetchall(self):
+        return self._result_rows
+
+
+class _FakeUpdateConn:
+    def __init__(self, cur):
+        self._cur = cur
+        self.committed = False
+
+    @contextmanager
+    def cursor(self):
+        yield self._cur
+
+    def commit(self):
+        self.committed = True
+
+
+def test_reconcile_orphaned_runs_marks_running_rows_crashed(monkeypatch):
+    cur = _FakeUpdateCursor(matching_ids=[3, 7])
+    fake_conn = _FakeUpdateConn(cur)
+    monkeypatch.setattr(wd_dbc, "conn", lambda: _wrap(fake_conn))
+
+    count = wd_dbc.reconcile_orphaned_runs()
+
+    assert count == 2
+    assert "status='crashed'" in cur.executed_sql
+    assert "status='running'" in cur.executed_sql
+    assert fake_conn.committed is True
+
+
+def test_reconcile_orphaned_runs_returns_zero_when_nothing_stuck(monkeypatch):
+    cur = _FakeUpdateCursor(matching_ids=[])
+    fake_conn = _FakeUpdateConn(cur)
+    monkeypatch.setattr(wd_dbc, "conn", lambda: _wrap(fake_conn))
+
+    assert wd_dbc.reconcile_orphaned_runs() == 0
+    assert fake_conn.committed is True
+
+
+@contextmanager
+def _wrap(obj):
+    yield obj

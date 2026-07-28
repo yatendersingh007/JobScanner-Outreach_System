@@ -114,6 +114,7 @@ def run_single_firm(mode: str, firm_name: str, dry: bool = False,
     {"qualified": result.qualified,
      "disqualified": result.disqualified,
      "parked": result.parked}.get(firm["icp_status"], result.parked).append(firm)
+    signal_pipeline._apply_draft_cap_fields(result)
     dbc.update_wd_run(
         result.run_id,
         status="done",
@@ -179,6 +180,7 @@ def run_resume(dry: bool = False, progress=tg.progress):
          "parked": result.parked}.get(firm["icp_status"], result.parked).append(firm)
 
     result.deferred = [SimpleNamespace(firm_name=q["firm_name"]) for q in still_pending]
+    signal_pipeline._apply_draft_cap_fields(result)
     dbc.update_wd_run(
         run_id,
         status="cancelled" if result.cancelled else "done",
