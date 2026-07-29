@@ -18,6 +18,7 @@ import logging
 import re
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 import requests
@@ -172,6 +173,22 @@ def parse_scan_args(arg: str) -> dict:
 # holds _busy for its duration. Every other command is fast enough to run
 # synchronously inside _dispatch, exactly as referral-system does it.
 # ---------------------------------------------------------------------------
+def _mark_interrupted() -> None:
+    """Same gap as src/cli.py's own _mark_interrupted (see its docstring):
+    signal_pipeline.run()'s inner crash handler only catches Exception, so a
+    BaseException (KeyboardInterrupt/SystemExit) reaching this far leaves
+    wd_runs stuck at status='running' even though the lock itself already
+    released via that call's own finally. A real Ctrl+C lands on run_bot()'s
+    main polling thread, not this background thread -- this mainly guards
+    a SystemExit or a future direct call reaching _run_scan_job/_resume_job
+    outside a thread. release_run_lock() is safe to call again regardless."""
+    run = dbc.latest_running_run()
+    if run:
+        dbc.update_wd_run(run["id"], status="crashed",
+                          finished_at=datetime.now(timezone.utc), notes="interrupted")
+    dbc.release_run_lock()
+
+
 def _run_scan_job(parsed: dict) -> None:
     try:
         tg.reset_live()
@@ -200,6 +217,12 @@ def _run_scan_job(parsed: dict) -> None:
             tg.finish("crashed")
             tg.send(f"Workflow D run CRASHED: {type(e).__name__}: {e}")
             return
+        except BaseException as e:
+            _mark_interrupted()
+            tg.finish("crashed")
+            tg.send(f"Workflow D run interrupted: {type(e).__name__}. "
+                    "Run marked crashed, lock released.")
+            raise
 
         # Prompt 2 step 2a's spend/draft intent message and prompt 3's actual
         # drafting both happen INSIDE run_scan()/run_single_firm() now (Prompt
@@ -239,6 +262,11 @@ def _resume_job() -> None:
             tg.finish("crashed")
             tg.send(f"Resume failed: {type(e).__name__}: {e}")
             return
+        except BaseException as e:
+            _mark_interrupted()
+            tg.finish("crashed")
+            tg.send(f"Resume interrupted: {type(e).__name__}. Run marked crashed, lock released.")
+            raise
         if result is None:
             tg.send("Nothing to resume. No crashed or cancelled run on record.")
             return

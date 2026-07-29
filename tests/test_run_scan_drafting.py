@@ -135,3 +135,20 @@ def test_summarize_reports_drafted_and_fallback_counts():
     assert "DUPLICATE WITHIN RUN" in text
     assert "Dup Co" in text
     assert "forbidden_claim:manpreet_mention=1" in text
+
+
+def test_summarize_reports_tinyfish_skipped_targets():
+    result = RunResult(run_id=10, mode="manual", recency_days_used=1, dry=True)
+    result.tinyfish_steps_launched = 30
+    result.tinyfish_skipped = [
+        {"name": "SelectLeaders - Controller", "reason": "step_budget_exhausted:specialist"},
+        {"name": "eFinancialCareers - Controller", "reason": "step_budget_exhausted:specialist"},
+        {"name": "LinkedIn Canada - Asset Management Analyst", "reason": "aborted_after_consecutive_failures"},
+    ]
+
+    text = run_scan.summarize(result)
+
+    assert ("step budget exhausted (specialist) after target 30, skipped: "
+           "SelectLeaders - Controller, eFinancialCareers - Controller") in text
+    assert ("aborted after 3 consecutive failures, skipped: "
+           "LinkedIn Canada - Asset Management Analyst") in text

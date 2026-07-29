@@ -3,6 +3,10 @@
 # commit: 8a5392cefbcbdf4f1dc8454ac464389d35ce230f
 # copied: 2026-07-28
 # Fixing a bug here requires the same fix filed against the donor repo.
+# LOCAL EDIT (2026-07-29, not yet filed against donor — see DRIFT.md): added
+# per-group step-budget tracking, skipped-target reporting, and a
+# consecutive-failure abort to fetch(). Nothing about the original request/
+# poll/extract logic changed.
 """Connector C — TinyFish, for niche boards that have no public API.
 
 Point it at board search URLs (SelectLeaders, eFinancialCareers, Job Search
@@ -24,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from datetime import datetime
 
@@ -40,6 +45,31 @@ RUN_ENDPOINT = f"{BASE}/runs/{{run_id}}"
 HTTP_TIMEOUT = 60
 POLL_INTERVAL = 10
 MAX_WAIT = 900  # seconds per target before giving up; dense boards (90+ listings) exceed 600
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+# Step budget (LOCAL EDIT). TINYFISH_STEP_CAP_PER_RUN was declared in
+# src/wd_config.py from Prompt 3 onward but read nowhere — a "budget guard"
+# in name only (see BUILD_LOG.md). Wired here, in the connector, as the
+# OVERALL ceiling across every target combined, read directly via os.getenv
+# rather than importing src.wd_config: scanner/ is a standalone, reusable
+# package (see DRIFT.md) and must not depend on a Workflow-D-specific
+# module, so the same env var is just read a second, independent way.
+# Layered under two GROUP-specific sub-ceilings, since a LinkedIn guest-
+# search page and a specialist board have different per-page cost profiles.
+# All three default well above today's actual target counts (22 LinkedIn, 8
+# specialist, 30 total) — they exist to bound wall-clock as the target list
+# grows, not to constrain the config committed alongside this change.
+LINKEDIN_MAX_STEPS = _env_int("TINYFISH_MAX_STEPS_LINKEDIN", 30)
+SPECIALIST_MAX_STEPS = _env_int("TINYFISH_MAX_STEPS_SPECIALISTS", 40)
+OVERALL_MAX_STEPS = _env_int("TINYFISH_STEP_CAP_PER_RUN", 200)
+MAX_CONSECUTIVE_FAILURES = 3
 
 GOAL_TEMPLATE = (
     "This is a job board search results page. Extract every job posting listed "
@@ -80,21 +110,64 @@ class TinyFishConnector(Connector):
         self.api_key = api_key
         self.targets = targets or []
         self.titles = titles
+        # Populated fresh by every fetch(): every target this run did NOT
+        # launch, with why. Never a silent truncation — the pipeline reads
+        # this off the connector (scanner/pipeline.py) and the run summary
+        # reports it by name (src/run_scan.py).
+        self.skipped_targets: list[dict] = []
+        self.steps_launched = 0  # targets actually started, success or failure
+
+    @staticmethod
+    def _group(name: str) -> str:
+        """LinkedIn vs. specialist boards, inferred from the target's own
+        `name` (e.g. "LinkedIn US - Property Accountant") — no new YAML
+        field needed, and scanner/pipeline.py's build_connectors() call site
+        is untouched."""
+        return "linkedin" if "linkedin" in (name or "").lower() else "specialist"
 
     def fetch(self) -> list[NormalizedJob]:
+        self.skipped_targets = []
+        self.steps_launched = 0
         if not self.api_key:
             log.info("TinyFish: no API key set — skipping (add TINYFISH_API_KEY to enable)")
             return []
         goal = GOAL_TEMPLATE.format(titles=", ".join(f'"{t}"' for t in self.titles))
         jobs: list[NormalizedJob] = []
+        group_steps = {"linkedin": 0, "specialist": 0}
+        group_caps = {"linkedin": LINKEDIN_MAX_STEPS, "specialist": SPECIALIST_MAX_STEPS}
+        consecutive_failures = 0
+        aborted = False
+
         for t in self.targets:
             name, url = t.get("name", "board"), t.get("url")
             if not url:
                 continue
+
+            # A consecutive-failure abort stops LAUNCHING new targets, but
+            # every remaining one is still recorded as skipped — never a
+            # silent truncation of the target list.
+            if aborted:
+                self.skipped_targets.append(
+                    {"name": name, "reason": "aborted_after_consecutive_failures"})
+                continue
+
+            group = self._group(name)
+            if group_steps[group] >= group_caps[group]:
+                self.skipped_targets.append(
+                    {"name": name, "reason": f"step_budget_exhausted:{group}"})
+                continue
+            if self.steps_launched >= OVERALL_MAX_STEPS:
+                self.skipped_targets.append(
+                    {"name": name, "reason": "step_budget_exhausted:overall"})
+                continue
+
+            group_steps[group] += 1
+            self.steps_launched += 1
             try:
                 log.info("TinyFish %s: starting agent run on %s", name, url)
                 rows = self._run(url, goal)
                 log.info("TinyFish %-22s %d roles", name, len(rows))
+                consecutive_failures = 0
                 for j in rows:
                     jobs.append(NormalizedJob(
                         company=j.get("company", ""),
@@ -106,6 +179,12 @@ class TinyFishConnector(Connector):
                     ))
             except (requests.RequestException, ValueError, TimeoutError) as e:
                 log.warning("TinyFish target %s failed: %s", name, e)
+                consecutive_failures += 1
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    aborted = True
+                    log.warning(
+                        "TinyFish: aborting remaining targets after %d consecutive failures",
+                        consecutive_failures)
         return jobs
 
     def _headers(self):

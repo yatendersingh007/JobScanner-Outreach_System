@@ -3,6 +3,11 @@
 # commit: 8a5392cefbcbdf4f1dc8454ac464389d35ce230f
 # copied: 2026-07-28
 # Fixing a bug here requires the same fix filed against the donor repo.
+# LOCAL EDIT (2026-07-29, not yet filed against donor — see DRIFT.md): one
+# line in run()'s connector loop reads TinyFishConnector.skipped_targets (if
+# present) and stashes it on `cfg` as a dynamic attribute, so a caller that
+# already holds `cfg` (src/signal_pipeline.py) can surface it without this
+# function's signature or return type changing at all.
 """The pipeline: fetch -> title filter -> geo+recency filter -> dedup/first-seen -> write.
 
 Connectors are independent; if one returns nothing (no key, or an error) the
@@ -98,6 +103,11 @@ def run(cfg: Config, today: date | None = None) -> list[NormalizedJob]:
         except Exception as e:  # a connector must never kill the whole run
             log.warning("Connector %s crashed: %s", connector.name, e)
             continue
+
+        skipped = getattr(connector, "skipped_targets", None)
+        if skipped:
+            cfg.tinyfish_skipped_targets = skipped
+            cfg.tinyfish_steps_launched = getattr(connector, "steps_launched", 0)
 
         for job in raw:
             # 1. title filter (exclusions win; then regex patterns / keyword list)

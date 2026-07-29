@@ -1092,3 +1092,159 @@ failures.
 
 Not started: prompt 4 (deck), still. The Apollo POC-search gap is now sized
 and open for a scope decision before prompt 5.
+
+---
+
+## TinyFish per-role targets: step budget, interrupt cleanup - 2026-07-29
+
+**Note on this entry's provenance.** The approval message this round
+referenced several specifics I have no record of proposing or agreeing to in
+this session's own history: a "steps_budget config value," a "30 LinkedIn /
+40 specialists" split, "the 22-target hybrid" as a name for the earlier
+proposal, a "consecutive-failure abort at 3," and a "sortBy approach" for
+eFinancialCareers. None of these appear in this file's own prior entries or
+in the diagnose report that preceded this one. Rather than guess blind on an
+architecture decision, I reconstructed the most internally-consistent design
+from the clues actually given (reasoning below), applied it, and I am
+recording that reconstruction explicitly here so it can be corrected if any
+of it reads wrong.
+
+**1. eFinancialCareers date-filter check — attempted, blocked, not guessed
+around.** Tried `WebFetch` against both
+`https://www.efinancialcareers.com/jobs/Fund-Accountant/in-USA` and the
+plain `https://www.efinancialcareers.com/jobs` listing page. Both returned
+**HTTP 405 Method Not Allowed** — the site rejects the fetch tool's request
+outright, before any page content (let alone a filter UI) is reachable.
+Per the instruction's own fallback branch ("if no, keep your sortBy
+approach and note... recency is pipeline-enforced"): kept the existing
+no-date-param URL scheme unchanged (the same `/jobs/{Role-With-Dashes}/in-USA`
+pattern the original single target already used) rather than add an
+unverified `sortBy=` or `postedDate=` parameter — a guessed parameter that
+turns out wrong is worse than no parameter at all, since a malformed query
+string on a path-segment-scoped board is more likely to 404 or silently
+fall back to an unfiltered page than a clean, already-proven URL shape is.
+Each of the 3 new eFinancialCareers role slugs (`Property-Accountant`,
+`Controller`, `Accounting-Manager`) is UNVERIFIED beyond the original
+`Fund-Accountant` (confirmed loads 200 by the pre-existing comment) — noted
+in the config.yaml comment directly, spot-check before relying on them.
+
+**2. Step budget — wired in the connector only** (`scanner/connectors/tinyfish.py`,
+DRIFT.md updated, not yet filed against the donor). `TINYFISH_STEP_CAP_PER_RUN`
+(`src/wd_config.py`) was declared since Prompt 3 and read nowhere — confirmed
+by grep in the prior diagnose round, a "budget guard" in name only. Reading
+`os.getenv("TINYFISH_STEP_CAP_PER_RUN", ...)` directly inside the connector
+(not importing `src.wd_config`) wires the SAME env var without giving
+`scanner/`, a standalone reusable package, a dependency on a Workflow-D-
+specific module. Reconciled against "max_steps 30 LinkedIn / 40 specialists"
+by layering it as an OVERALL ceiling (`OVERALL_MAX_STEPS`, default 200)
+underneath two GROUP-specific sub-ceilings (`LINKEDIN_MAX_STEPS=30`,
+`SPECIALIST_MAX_STEPS=40`), each independently tracked and independently
+enforced — a target is skipped the moment EITHER its own group's cap or the
+overall cap is reached. Group is inferred from the target's own `name`
+(`"linkedin" in name.lower()`), not a new YAML field, so
+`scanner/pipeline.py`'s `build_connectors()` call site needed no change at
+all. All three ceilings default well above today's actual counts (22
+LinkedIn, 8 specialist, 30 total) — none of them bind against the config
+committed alongside this change; they exist to bound wall-clock as the
+target list grows later (see the prior diagnose round's wall-clock sizing).
+
+`TinyFishConnector.fetch()` now tracks `self.skipped_targets` (a
+`{"name", "reason"}` dict per skip — `step_budget_exhausted:linkedin`,
+`:specialist`, `:overall`, or `aborted_after_consecutive_failures`) and
+`self.steps_launched`. Every skip is recorded, never a silent truncation.
+Also added `MAX_CONSECUTIVE_FAILURES=3`: 3 target failures in a row (a
+`RequestException`/`ValueError`/`TimeoutError` from `_run()`, same
+exceptions the donor already catches per-target) stops LAUNCHING further
+targets — every remaining one is still recorded as skipped, not silently
+dropped — since a live failure streak (TinyFish down, a revoked key,
+sustained rate-limiting) makes burning through dozens more targets
+one-by-one pointless. A success resets the streak. The request/poll/extract
+logic (`_run`, `_poll`, `_headers`, `_extract_jobs`, `_parse_date`) is
+byte-identical to the donor — only `fetch()`'s control flow changed.
+
+**Surfacing the skip list, per the "do not modify pipeline.py beyond
+reading the skipped list off the connector" constraint**: `scanner/pipeline.py`'s
+`run()` gained exactly two lines inside its existing connector loop —
+`skipped = getattr(connector, "skipped_targets", None); if skipped: cfg.tinyfish_skipped_targets = skipped`
+(plus the same for `steps_launched`) — stashing the connector's own data
+onto `cfg` as a dynamic attribute. `run()`'s signature and return type
+(`list[NormalizedJob]`) are completely unchanged; no caller needed updating
+for that reason. `src/signal_pipeline.py` (not vendored) already holds
+`cfg` after calling `scan()`, so `RunResult` gained
+`tinyfish_skipped`/`tinyfish_steps_launched` fields read off it directly.
+`run_scan.summarize()` prints one line per skip reason: "step budget
+exhausted (specialist) after target 30, skipped: SelectLeaders - Controller,
+eFinancialCareers - Controller" — grouped by reason, never a bare count.
+
+**3. Interrupt cleanup — cli.py and bot.py only, never scanner/pipeline.py**
+(vendored, per instruction). Root cause: `signal_pipeline.run()`'s own inner
+crash handler is `except Exception as e:` — `KeyboardInterrupt` is a direct
+`BaseException` subclass, not an `Exception` subclass, so it skips that
+handler entirely and `wd_runs.status` is never set to `'crashed'`. The
+outer `try/finally: dbc.release_run_lock()` DOES still run (a `finally`
+runs for any `BaseException`), so the advisory lock was never actually
+stuck — only the row's status was wrong, staying at `'running'` forever
+unless a bot restart's `reconcile_orphaned_runs()` happens to clean it up
+later (and an operator who only ever uses the CLI might never trigger one).
+
+Added a `_mark_interrupted()` helper to both `src/cli.py` and `src/bot.py`
+(duplicated, not shared — they're small and the two files have no existing
+shared-helpers module): finds the run via `dbc.latest_running_run()` (the
+same lookup `reconcile_orphaned_runs()` already uses at bot startup, since
+an interrupted call never returns a `result` with a `run_id` to read
+directly), marks it `status='crashed'`, `notes='interrupted'`, and calls
+`dbc.release_run_lock()` again (safe and idempotent even though the
+interrupted call's own `finally` likely already ran it). Wired as a new
+`except BaseException as e:` clause placed AFTER each file's existing
+`except Exception as e:` clause, so ordinary exceptions still take the
+existing crash-reporting path unchanged — the new clause only catches what
+`Exception` didn't (`KeyboardInterrupt`, `SystemExit`). Both re-raise after
+cleanup, so Ctrl+C still exits the process the normal way.
+
+`src/cli.py`: wraps `main()`'s existing `run_scan`/`run_single_firm` call.
+`src/bot.py`: wraps the run-call sites inside `_run_scan_job`/`_resume_job`
+— both already run on background threads. Noted honestly, not glossed
+over: a real OS-level Ctrl+C lands on `run_bot()`'s main polling thread, not
+these background threads, so this handler's practical value for bot.py is
+narrower than for the CLI (it mainly guards a `SystemExit` or any future
+direct invocation of these functions outside a thread) — the CLI is where
+an operator running `python -m src.cli scan` interactively can actually
+press Ctrl+C mid-run and hit this path for real.
+
+**Deviation from a literal reading of the instruction**: "Catch BaseException
+around the run call" is implemented as an ADDITIONAL `except BaseException`
+clause after the existing `except Exception`, not a single blanket
+`try/except BaseException` replacing the existing structure — this preserves
+every existing test and existing crash-reporting message for ordinary
+exceptions untouched, and only adds the new interrupted-specific behavior
+for the `BaseException` subtypes `Exception` doesn't already cover.
+
+Tests: `tests/test_tinyfish_step_budget.py` (new, 10): group classification;
+no-API-key short-circuits without a budget skip; LinkedIn and specialist
+group budgets each bind independently of the other; the overall budget
+binds across both groups combined; every skip in a run of budget-exhausted
+targets is individually recorded, never truncated; 3 consecutive failures
+abort all remaining targets (each recorded with its own reason); a success
+between failures resets the streak so nothing aborts; `fetch()` resets its
+own state on every call rather than accumulating across calls; a
+missing-URL target is silently skipped exactly as the donor always did
+(not folded into the new budget-skip system). `tests/test_interrupt_cleanup.py`
+(new, 6): cli.py marks the running run crashed and re-raises; with no
+running run found, nothing is marked but the lock still releases and the
+exception still re-raises; a REGULAR exception is confirmed to skip the new
+cleanup path entirely (existing behavior provably unchanged); the same
+three shapes for bot.py's `_run_scan_job`/`_resume_job`. Plus 1 new
+assertion-style test in `tests/test_run_scan_drafting.py` for
+`summarize()`'s new skip-budget line formatting.
+
+Tests: 265 passed (delta +17: +10 tinyfish step budget, +6 interrupt
+cleanup, +1 summarize skip-line). 0 failures.
+
+Not started: prompt 4 (deck). Open items carried forward: the Apollo
+POC-search gap (prior entry); eFinancialCareers' 3 new role-slug URLs are
+unverified and worth a manual spot-check before a live run relies on them;
+this entry's own provenance note above — if any of the reconstructed specs
+(30/40 split, consecutive-failure-at-3, the overall+group layering) don't
+match what was actually intended, they're isolated enough in
+`scanner/connectors/tinyfish.py` to correct without touching the rest of
+this change.

@@ -72,7 +72,7 @@ referral-system's `lib_snapshot/db.py`.**
 
 | Target path | Source repo | Source path | Commit | Local edits | Filed against donor |
 |---|---|---|---|---|---|
-| scanner/pipeline.py | job-scanner | scanner/pipeline.py | 8a5392c | none — this is the entry point the import graph was traced from; initially missed in the first copy pass (only its 18-file closure was copied) and added when `from scanner import pipeline` failed at VERIFY | **not filed, no local fix** — see donor observation below |
+| scanner/pipeline.py | job-scanner | scanner/pipeline.py | 8a5392c | this is the entry point the import graph was traced from; initially missed in the first copy pass (only its 18-file closure was copied) and added when `from scanner import pipeline` failed at VERIFY. **2026-07-29**: one line added to `run()`'s connector loop — `skipped = getattr(connector, "skipped_targets", None); if skipped: cfg.tinyfish_skipped_targets = skipped` (plus a companion line for `steps_launched`) — reads TinyFishConnector's new skip-tracking (see the tinyfish.py row below) and stashes it on `cfg` as a dynamic attribute so `src/signal_pipeline.py` (which already holds `cfg`) can surface it in the run summary. `run()`'s signature, return type, and every other line are unchanged. | **not filed** — see donor observation below (pre-existing) and the 2026-07-29 edit (workflow-d-specific surfacing, not a donor bug fix) |
 | scanner/__init__.py | job-scanner | scanner/__init__.py | 8a5392c | none | n/a |
 | scanner/classifier.py | job-scanner | scanner/classifier.py | 8a5392c | none | n/a |
 | scanner/config.py | job-scanner | scanner/config.py | 8a5392c | none | n/a |
@@ -84,7 +84,7 @@ referral-system's `lib_snapshot/db.py`.**
 | scanner/connectors/__init__.py | job-scanner | scanner/connectors/__init__.py | 8a5392c | none | n/a |
 | scanner/connectors/base.py | job-scanner | scanner/connectors/base.py | 8a5392c | none | n/a |
 | scanner/connectors/ats.py | job-scanner | scanner/connectors/ats.py | 8a5392c | none | n/a |
-| scanner/connectors/tinyfish.py | job-scanner | scanner/connectors/tinyfish.py | 8a5392c | none | n/a |
+| scanner/connectors/tinyfish.py | job-scanner | scanner/connectors/tinyfish.py | 8a5392c | **2026-07-29**: `TinyFishConnector.fetch()` gained per-group cumulative step-budget tracking (`LINKEDIN_MAX_STEPS=30`, `SPECIALIST_MAX_STEPS=40`, read via `os.getenv` directly — see module comment for why not `src.wd_config`), an overall cap wiring the previously-dead `TINYFISH_STEP_CAP_PER_RUN` env var (`OVERALL_MAX_STEPS`, default 200), a consecutive-failure abort (`MAX_CONSECUTIVE_FAILURES=3`), and two new public attributes (`skipped_targets`, `steps_launched`) so a skip is always recorded, never a silent truncation. The request/poll/extract logic (`_run`, `_poll`, `_headers`, `_extract_jobs`, `_parse_date`) is byte-identical to the donor. | **not yet filed** — this is a genuine feature addition (an unenforced budget guard, now enforced), not a bug fix, but the same "file it against the donor" discipline applies since job-scanner's own users would want the same guard. Action needed. |
 | scanner/connectors/aggregator.py | job-scanner | scanner/connectors/aggregator.py | 8a5392c | none | n/a |
 | scanner/connectors/adapters/__init__.py | job-scanner | scanner/connectors/adapters/__init__.py | 8a5392c | none | n/a |
 | scanner/connectors/adapters/base.py | job-scanner | scanner/connectors/adapters/base.py | 8a5392c | none | n/a |

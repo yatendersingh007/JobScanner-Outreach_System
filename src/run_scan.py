@@ -93,6 +93,23 @@ def summarize(r, dry_hint: str = "--dry") -> str:
         lines += ["", "CONNECTOR HEALTH: zero results from "
                       + ", ".join(r.connector_health)
                       + ". Check the target page markup."]
+    if r.tinyfish_skipped:
+        by_reason: dict = {}
+        for s in r.tinyfish_skipped:
+            by_reason.setdefault(s["reason"], []).append(s["name"])
+        lines += ["", "TINYFISH TARGETS SKIPPED (never truncated silently):"]
+        for reason, names in by_reason.items():
+            if reason.startswith("step_budget_exhausted"):
+                group = reason.split(":", 1)[1] if ":" in reason else "overall"
+                lines.append(
+                    f"  step budget exhausted ({group}) after target "
+                    f"{r.tinyfish_steps_launched}, skipped: {', '.join(names)}"
+                )
+            elif reason == "aborted_after_consecutive_failures":
+                lines.append(f"  aborted after 3 consecutive failures, "
+                            f"skipped: {', '.join(names)}")
+            else:
+                lines.append(f"  {reason}: {', '.join(names)}")
     if r.dry:
         lines += ["", f"Dry run. Stopped after gating. Re-run without {dry_hint} to draft."]
     elif r.qualified:

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime, timezone
 
 from . import wd_config as config, wd_dbc as dbc
 from .run_scan import run_scan, run_single_firm, summarize
@@ -50,6 +51,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _mark_interrupted() -> None:
+    """A run cut off by Ctrl+C (KeyboardInterrupt) never reaches
+    signal_pipeline.run()'s own crash handler -- that inner try/except only
+    catches Exception, not BaseException, so a KeyboardInterrupt propagates
+    straight past it without ever marking wd_runs.status='crashed'. Its own
+    `finally: dbc.release_run_lock()` DOES still run (finally runs for any
+    BaseException), so the lock is never actually stuck -- but the row
+    itself sits at 'running' forever unless a bot happens to start later and
+    reconcile it. Finds the run via latest_running_run() (the same lookup
+    reconcile_orphaned_runs() uses at bot startup) since an interrupted
+    run_scan()/run_single_firm()/run_resume() call never returns a `result`
+    with a run_id to read directly. release_run_lock() is safe to call again
+    even though the interrupted call's own finally likely already did."""
+    run = dbc.latest_running_run()
+    if run:
+        dbc.update_wd_run(run["id"], status="crashed",
+                          finished_at=datetime.now(timezone.utc), notes="interrupted")
+    dbc.release_run_lock()
+
+
 def main(argv: list | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -80,6 +101,14 @@ def main(argv: list | None = None) -> int:
         return 1
     except Exception as e:  # a crashed run must say so, not print a traceback only
         print(f"Workflow D run CRASHED: {type(e).__name__}: {e}", file=sys.stderr)
+        raise
+    except BaseException as e:
+        # Not an Exception (KeyboardInterrupt/SystemExit) -- the branch
+        # above never ran. Mark the row crashed, release the lock, re-raise
+        # so Ctrl+C still exits the process the normal way.
+        _mark_interrupted()
+        print(f"\nInterrupted: {type(e).__name__}. Run marked crashed, lock released.",
+              file=sys.stderr)
         raise
 
     print("")

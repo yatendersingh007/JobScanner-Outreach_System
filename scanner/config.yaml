@@ -104,7 +104,7 @@ connectors:
   # API calls per run = (number of queries) x (number of countries).
   # With 7 queries x 2 countries = 14 calls per run. Mind your RapidAPI quota.
   aggregator:
-    enabled: true
+    enabled: false
     provider: jsearch
     countries:
       - us
@@ -129,17 +129,66 @@ connectors:
 
   # TinyFish — niche boards with no API. LinkedIn searches are location-scoped
   # and use f_TPR=r86400 (posted in the last 24 hours). Scope = US + Canada.
+  #
+  # Per-role sequential targets, one role per board per target, in PRIORITY
+  # ORDER with US/Canada interleaved per role (not all-US-then-all-CA):
+  # under a binding step budget the tail of this list never runs, and both
+  # geographies of a top role beat one geography of a weak one. LinkedIn
+  # gets full 11-role coverage on both markets (it's the volume source and
+  # its URL scheme is proven — only the keywords= value changes). Select-
+  # Leaders and eFinancialCareers are trimmed to the 4 highest-frequency
+  # roles, not the full 11, to bound wall-clock (see BUILD_LOG.md's sizing).
+  # Step budgets live in scanner/connectors/tinyfish.py (LINKEDIN_MAX_STEPS=30,
+  # SPECIALIST_MAX_STEPS=40, OVERALL_MAX_STEPS=200 by default) — all three
+  # are headroom above today's actual counts (22 LinkedIn, 8 specialist), so
+  # none of them bind against this list; they exist to bound wall-clock as
+  # this list grows later, not to constrain it today.
   tinyfish:
     enabled: true
     targets:
-      # US-only commercial real estate board. No 24h URL filter available, so
-      # the pipeline's recency filter (+ first-seen grace) does the cutting.
-      - { name: "SelectLeaders",       url: "https://www.selectleaders.com/jobs/?keywords=Fund+Accountant" }
-      # USA-scoped listing page (verified loads 200). Same note as above.
-      - { name: "eFinancialCareers",   url: "https://www.efinancialcareers.com/jobs/Fund-Accountant/in-USA" }
-      # LinkedIn public (no-login) guest search, per market, past 24h (f_TPR=r86400).
-      - { name: "LinkedIn US",         url: "https://www.linkedin.com/jobs/search?keywords=Fund%20Accountant&location=United%20States&f_TPR=r86400" }
-      - { name: "LinkedIn Canada",     url: "https://www.linkedin.com/jobs/search?keywords=Fund%20Accountant&location=Canada&f_TPR=r86400" }
+      # ── LinkedIn: full 11-role coverage, US then CA per role ──
+      - { name: "LinkedIn US - Property Accountant",           url: "https://www.linkedin.com/jobs/search?keywords=Property%20Accountant&location=United%20States&f_TPR=r86400" }
+      - { name: "LinkedIn Canada - Property Accountant",       url: "https://www.linkedin.com/jobs/search?keywords=Property%20Accountant&location=Canada&f_TPR=r86400" }
+      - { name: "LinkedIn US - Fund Accountant",               url: "https://www.linkedin.com/jobs/search?keywords=Fund%20Accountant&location=United%20States&f_TPR=r86400" }
+      - { name: "LinkedIn Canada - Fund Accountant",           url: "https://www.linkedin.com/jobs/search?keywords=Fund%20Accountant&location=Canada&f_TPR=r86400" }
+      - { name: "LinkedIn US - Controller",                    url: "https://www.linkedin.com/jobs/search?keywords=Controller&location=United%20States&f_TPR=r86400" }
+      - { name: "LinkedIn Canada - Controller",                url: "https://www.linkedin.com/jobs/search?keywords=Controller&location=Canada&f_TPR=r86400" }
+      - { name: "LinkedIn US - Assistant Controller",          url: "https://www.linkedin.com/jobs/search?keywords=Assistant%20Controller&location=United%20States&f_TPR=r86400" }
+      - { name: "LinkedIn Canada - Assistant Controller",      url: "https://www.linkedin.com/jobs/search?keywords=Assistant%20Controller&location=Canada&f_TPR=r86400" }
+      - { name: "LinkedIn US - Real Estate Accountant",        url: "https://www.linkedin.com/jobs/search?keywords=Real%20Estate%20Accountant&location=United%20States&f_TPR=r86400" }
+      - { name: "LinkedIn Canada - Real Estate Accountant",    url: "https://www.linkedin.com/jobs/search?keywords=Real%20Estate%20Accountant&location=Canada&f_TPR=r86400" }
+      - { name: "LinkedIn US - CAM Analyst",                   url: "https://www.linkedin.com/jobs/search?keywords=CAM%20Analyst&location=United%20States&f_TPR=r86400" }
+      - { name: "LinkedIn Canada - CAM Analyst",               url: "https://www.linkedin.com/jobs/search?keywords=CAM%20Analyst&location=Canada&f_TPR=r86400" }
+      - { name: "LinkedIn US - Lease Administrator",           url: "https://www.linkedin.com/jobs/search?keywords=Lease%20Administrator&location=United%20States&f_TPR=r86400" }
+      - { name: "LinkedIn Canada - Lease Administrator",       url: "https://www.linkedin.com/jobs/search?keywords=Lease%20Administrator&location=Canada&f_TPR=r86400" }
+      - { name: "LinkedIn US - Lease Analyst",                 url: "https://www.linkedin.com/jobs/search?keywords=Lease%20Analyst&location=United%20States&f_TPR=r86400" }
+      - { name: "LinkedIn Canada - Lease Analyst",             url: "https://www.linkedin.com/jobs/search?keywords=Lease%20Analyst&location=Canada&f_TPR=r86400" }
+      - { name: "LinkedIn US - Accounting Manager",            url: "https://www.linkedin.com/jobs/search?keywords=Accounting%20Manager&location=United%20States&f_TPR=r86400" }
+      - { name: "LinkedIn Canada - Accounting Manager",        url: "https://www.linkedin.com/jobs/search?keywords=Accounting%20Manager&location=Canada&f_TPR=r86400" }
+      - { name: "LinkedIn US - Acquisitions Analyst",          url: "https://www.linkedin.com/jobs/search?keywords=Acquisitions%20Analyst&location=United%20States&f_TPR=r86400" }
+      - { name: "LinkedIn Canada - Acquisitions Analyst",      url: "https://www.linkedin.com/jobs/search?keywords=Acquisitions%20Analyst&location=Canada&f_TPR=r86400" }
+      - { name: "LinkedIn US - Asset Management Analyst",      url: "https://www.linkedin.com/jobs/search?keywords=Asset%20Management%20Analyst&location=United%20States&f_TPR=r86400" }
+      - { name: "LinkedIn Canada - Asset Management Analyst",  url: "https://www.linkedin.com/jobs/search?keywords=Asset%20Management%20Analyst&location=Canada&f_TPR=r86400" }
+      # ── SelectLeaders: top 4 roles. No 24h URL filter available (verified
+      # keywords= search box, not a category slug), so the pipeline's
+      # recency filter (+ first-seen grace) does the cutting, same as before. ──
+      - { name: "SelectLeaders - Property Accountant",   url: "https://www.selectleaders.com/jobs/?keywords=Property+Accountant" }
+      - { name: "SelectLeaders - Fund Accountant",       url: "https://www.selectleaders.com/jobs/?keywords=Fund+Accountant" }
+      - { name: "SelectLeaders - Controller",            url: "https://www.selectleaders.com/jobs/?keywords=Controller" }
+      - { name: "SelectLeaders - Accounting Manager",    url: "https://www.selectleaders.com/jobs/?keywords=Accounting+Manager" }
+      # ── eFinancialCareers: top 4 roles, same path-segment scheme as the
+      # original single target (verified loads 200 for Fund-Accountant only;
+      # the other 3 role slugs are NOT independently verified — the site
+      # returns HTTP 405 to automated fetch tools, so this could not be
+      # checked live). Checked for a server-side date-posted filter param
+      # first and could not find one for the same reason (405 on every
+      # fetch attempt, including the plain /jobs listing page) — kept the
+      # existing no-date-param scheme rather than guess at an unverified
+      # parameter. Recency is pipeline-enforced here, same as SelectLeaders. ──
+      - { name: "eFinancialCareers - Property Accountant", url: "https://www.efinancialcareers.com/jobs/Property-Accountant/in-USA" }
+      - { name: "eFinancialCareers - Fund Accountant",     url: "https://www.efinancialcareers.com/jobs/Fund-Accountant/in-USA" }
+      - { name: "eFinancialCareers - Controller",          url: "https://www.efinancialcareers.com/jobs/Controller/in-USA" }
+      - { name: "eFinancialCareers - Accounting Manager",  url: "https://www.efinancialcareers.com/jobs/Accounting-Manager/in-USA" }
       # ── Disabled (out of North America scope) — re-enable by uncommenting ──
       # - { name: "LinkedIn UK",         url: "https://www.linkedin.com/jobs/search?keywords=Fund%20Accountant&location=United%20Kingdom&f_TPR=r86400" }
       # - { name: "LinkedIn India",      url: "https://www.linkedin.com/jobs/search?keywords=Fund%20Accountant&location=India&f_TPR=r86400" }

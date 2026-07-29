@@ -119,6 +119,11 @@ class RunResult:
     # HARD RULE 4: per-run aggregate fact-grounding/fallback counts, reset at
     # the start of every draft_for_run() call and reported here.
     fallback_counts: dict = field(default_factory=dict)
+    # TinyFish targets this run did NOT launch (step budget exhausted, or a
+    # consecutive-failure abort), each a {"name", "reason"} dict. Never a
+    # silent truncation -- see scanner/connectors/tinyfish.py's local edit.
+    tinyfish_skipped: list = field(default_factory=list)
+    tinyfish_steps_launched: int = 0
 
 
 _WS_RE = re.compile(r"\s+")
@@ -412,6 +417,8 @@ def run(mode: str = "manual", progress: Progress = _noop,
             result.postings_kept = len(jobs)
             result.csv_path = csv_path
             result.connector_health = connector_health(jobs, config.EXPECTED_SOURCES)
+            result.tinyfish_skipped = getattr(cfg, "tinyfish_skipped_targets", [])
+            result.tinyfish_steps_launched = getattr(cfg, "tinyfish_steps_launched", 0)
 
             blocklist = staffing_blocklist(cfg)
             groups, staffing, uncategorized = group_by_company(jobs, blocklist)
