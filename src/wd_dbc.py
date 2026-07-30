@@ -366,7 +366,7 @@ def verdict_cache_lookup(name: str, window_days: int) -> Optional[dict]:
             return dict(row)
         # Workflow C's table has no firm_key column; normalize in SQL-free Python.
         cur.execute(
-            "SELECT id, firm_name, icp_status, icp_reason, aum_tag, research, "
+            "SELECT id, firm_name, icp_status, icp_reason, aum_tag, research_raw AS research, "
             "       created_at AS decided_at "
             "  FROM wc_firms "
             " WHERE icp_status IN ('qualified','disqualified') AND created_at >= %s "

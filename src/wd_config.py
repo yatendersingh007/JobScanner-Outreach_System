@@ -33,12 +33,12 @@ SCANNER_CONFIG_PATH = os.getenv("SCANNER_CONFIG_PATH", str(ROOT / "scanner" / "c
 EXPECTED_SOURCES = [
     s.strip() for s in os.getenv(
         "EXPECTED_SOURCES",
-        "jsearch,SelectLeaders,eFinancialCareers,LinkedIn US,LinkedIn Canada",
+        "aggregator:jsearch",
     ).split(",") if s.strip()
 ]
 
 # ── Cost controls (BRIEF 4, open decision 11.2) ───────────────────────────
-GATE_CAP_PER_RUN = _int("GATE_CAP_PER_RUN", 10)     # NEW companies gated per run
+GATE_CAP_PER_RUN = _int("GATE_CAP_PER_RUN", 25)     # NEW companies gated per run
 REGATE_WINDOW_DAYS = _int("REGATE_WINDOW_DAYS", 90)  # reuse a verdict this fresh
 # Lower than GATE_CAP_PER_RUN on purpose (Prompt 1): scan drafts by default now,
 # with no human confirm between gating and drafting, so this cap IS the guard.

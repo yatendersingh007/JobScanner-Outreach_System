@@ -1340,3 +1340,99 @@ Tests: 267 passed (delta +2: the two no-hint tests were renamed in place,
 not added; +2 new fallback-success tests). 0 failures.
 
 Not started: prompt 4 (deck), still.
+
+---
+
+## Four out-of-band fixes from today's debugging session - 2026-07-30
+
+Committed as one commit, each found and fixed live against real traffic
+today, not diagnosed from source alone.
+
+**1. JSearch's endpoint and response shape both changed under us**
+(`scanner/connectors/adapters/jsearch.py`, vendored — DRIFT.md entry added).
+RapidAPI's JSearch moved to `/search-v2`; `ENDPOINT` updated, and the row
+extraction changed from `data.get("data") or []` to
+`(data.get("data") or {}).get("jobs") or []` since `/search-v2`'s `data` is
+now an object wrapping a `jobs` array, not the bare array `/search`
+returned. Filed as a donor bug in DRIFT.md (an external contract change,
+not job-scanner's own defect, but the donor's `/search` call needs the same
+fix) — not yet filed upstream.
+
+**2. `verdict_cache_lookup`'s Workflow C query selected a column that
+doesn't exist** (`src/wd_dbc.py`). The second `SELECT` (the one that falls
+back to scanning `wc_firms` when `wd_firms` has no cache hit) asked for a
+plain `research` column; Workflow C's actual `wc_firms` schema calls it
+`research_raw`. Changed to `research_raw AS research` so the rest of the
+function's `dict(row)`/`out["src"] = "cached_wc"` handling — which expects
+a `research` key — keeps working unchanged. Without this, any run that hit
+the `wc_firms` fallback path (a firm Workflow C already gated but Workflow
+D hadn't cached yet) would have failed with a bare "column research does
+not exist," not a graceful miss.
+
+**3. Two defaults changed in `src/wd_config.py`, and here's why they had to
+be defaults and not `.env` values**: `GATE_CAP_PER_RUN` 10 → 25, and
+`EXPECTED_SOURCES` from the old TinyFish-era list
+(`"jsearch,SelectLeaders,eFinancialCareers,LinkedIn US,LinkedIn Canada"`) to
+`"aggregator:jsearch"` — matching today's config (TinyFish and POC
+enrichment both off, aggregator the only live connector; the old
+`EXPECTED_SOURCES` list would otherwise print a permanent, false
+CONNECTOR HEALTH warning for every now-intentionally-disabled source).
+
+**The reason a `.env` edit alone didn't work, verified, not assumed**:
+`wd_config.py` reads every value via bare `os.getenv(...)` at MODULE IMPORT
+TIME, and the file has no `load_dotenv()` call of its own (confirmed by
+reading it: `import os; from pathlib import Path`, nothing else). It
+depends entirely on SOME OTHER already-imported module having already
+called `load_dotenv()` before `wd_config`'s own top-level assignments run.
+`src/cli.py`'s first import line is `from . import wd_config as config,
+wd_dbc as dbc` — `wd_config` (listed first) is imported to completion,
+running every one of its `_int(...)`/`_bool(...)` top-level calls, BEFORE
+`wd_dbc` (which transitively imports `lib_snapshot.db` →
+`lib_snapshot.config`, which DOES call `load_dotenv()`) is even touched.
+Verified directly, not inferred: a fresh process that imports only
+`from src import wd_config` never sees `GATE_CAP_PER_RUN` land in
+`os.environ` at all (`'GATE_CAP_PER_RUN' in os.environ` is `False`
+afterward). A fresh process that imports `src.cli` (the real entrypoint)
+DOES eventually see it appear in `os.environ` — but only after `wd_config`'s
+own module body already finished computing and freezing its constants
+using whatever `os.environ` held at that earlier moment, which was nothing.
+Python module-level assignments compute once, at import time, and are
+never re-evaluated when `os.environ` changes later in the same process —
+so `.env` genuinely cannot reach these particular values through the
+CLI's own import order, and changing the hardcoded default was the only
+fix that could actually take effect, not a stylistic choice. Worth fixing
+properly later (a `load_dotenv()` call at the top of `wd_config.py` itself,
+matching `scanner/config.py`'s own pattern) rather than treating "edit the
+default" as the permanent answer — not done here, out of scope for this
+entry, which is documenting today's live fixes as they were actually made.
+
+**4. `scanner/config.yaml` reconfigured for today's live run**: `aggregator`
+enabled (was off), scoped to `us` only (Canada dropped from `countries`),
+and its `queries` list replaced with a 20-item US-focused set (property/
+staff/senior/corporate accountant, accounts payable/receivable, fund
+accountant, controller, assistant controller, accounting manager, real
+estate accountant, property management/project/construction accountant,
+lease administrator, financial reporting analyst, fund administrator,
+family office accountant, investment analyst, tax accountant) — the
+comment above it now notes the real constraint: "Basic tier is a 200/month
+HARD limit... the connector has no call counter and will 403 mid-scan when
+the cap hits." `tinyfish` and `poc_enrichment` both flipped to `enabled:
+false` (today's run leaned on the aggregator only). 15 staffing-blocklist
+entries added (Staffing, Talent, Recruit, Personnel, Search Partners,
+Jobot, Metasys, SolomonEdwards, Hire Score, The Lee Group, SourcePro,
+Quantum Search, Advice Personnel, Sherwood, Syntax) on top of the existing
+list, from real recruiter/staffing firm names seen in today's live output.
+
+Also added to `.gitignore` (separate commit): `.env.backup`, `raw.json`,
+`qa_out/`, and the day's ad-hoc probe/debugging scripts at the repo root
+(`apollo_*.py`, `cols.py`, `fixdbc.py`, `gate.py`, `tav.py`, `test_poc.py`,
+`v12.py`, `void_wasatch.py`) — root-anchored (`/apollo_*.py`, not bare
+`apollo_*.py`) so the pattern can never shadow a real, tracked file nested
+elsewhere (e.g. `lib_referral/apollo_enrich.py`), confirmed directly with
+`git check-ignore`. `.env` was already ignored (confirmed with
+`git check-ignore -v .env`), unaffected by any of this.
+
+Tests: 267 passed (unchanged — these four fixes are runtime/config
+behavior with no new test coverage added in this entry; `pytest` was rerun
+to confirm none of the four changes broke anything already covered). 0
+failures.

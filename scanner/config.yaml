@@ -99,26 +99,37 @@ title_exclude_patterns:
 
 connectors:
 
-  # Aggregator ON — JSearch (RapidAPI) indexes Google for Jobs, which carries
+# Aggregator ON — JSearch (RapidAPI) indexes Google for Jobs, which carries
   # LinkedIn, Indeed, ZipRecruiter, Glassdoor, Monster and thousands more.
-  # API calls per run = (number of queries) x (number of countries).
-  # With 7 queries x 2 countries = 14 calls per run. Mind your RapidAPI quota.
+  # API calls per run = (queries) x (countries). 20 x 1 = 20 calls.
+  # Basic tier is a 200/month HARD limit, so 10 runs. Track them manually:
+  # the connector has no call counter and will 403 mid-scan when the cap hits.
   aggregator:
-    enabled: false
+    enabled: true
     provider: jsearch
     countries:
       - us
-      - ca
-      # - mx            # <-- uncomment to also search Mexico (pairs with "Mexico" in regions)
     queries:
       - property accountant
-      - real estate accountant
+      - staff accountant
+      - senior accountant
+      - accounts payable
       - fund accountant
+      - controller
+      - assistant controller
+      - accounting manager
+      - real estate accountant
+      - corporate accountant
+      - property management accountant
+      - project accountant
+      - construction accountant
+      - lease administrator
+      - financial reporting analyst
+      - fund administrator
+      - accounts receivable
       - family office accountant
-      - real estate acquisitions analyst
-      - asset management analyst real estate
-      - accounts payable real estate
-
+      - Investment analyst
+      - tax accountant
   # ATS feeds — free, no key. ats: greenhouse|lever|ashby|workable|
   # smartrecruiters|workday. For workday, token = the careers-page URL.
   ats:
@@ -144,7 +155,7 @@ connectors:
   # none of them bind against this list; they exist to bound wall-clock as
   # this list grows later, not to constrain it today.
   tinyfish:
-    enabled: true
+    enabled: false
     targets:
       # ── LinkedIn: full 11-role coverage, US then CA per role ──
       - { name: "LinkedIn US - Property Accountant",           url: "https://www.linkedin.com/jobs/search?keywords=Property%20Accountant&location=United%20States&f_TPR=r86400" }
@@ -185,10 +196,6 @@ connectors:
       # fetch attempt, including the plain /jobs listing page) — kept the
       # existing no-date-param scheme rather than guess at an unverified
       # parameter. Recency is pipeline-enforced here, same as SelectLeaders. ──
-      - { name: "eFinancialCareers - Property Accountant", url: "https://www.efinancialcareers.com/jobs/Property-Accountant/in-USA" }
-      - { name: "eFinancialCareers - Fund Accountant",     url: "https://www.efinancialcareers.com/jobs/Fund-Accountant/in-USA" }
-      - { name: "eFinancialCareers - Controller",          url: "https://www.efinancialcareers.com/jobs/Controller/in-USA" }
-      - { name: "eFinancialCareers - Accounting Manager",  url: "https://www.efinancialcareers.com/jobs/Accounting-Manager/in-USA" }
       # ── Disabled (out of North America scope) — re-enable by uncommenting ──
       # - { name: "LinkedIn UK",         url: "https://www.linkedin.com/jobs/search?keywords=Fund%20Accountant&location=United%20Kingdom&f_TPR=r86400" }
       # - { name: "LinkedIn India",      url: "https://www.linkedin.com/jobs/search?keywords=Fund%20Accountant&location=India&f_TPR=r86400" }
@@ -201,11 +208,11 @@ classifier:
   rules_file: classifier_rules.yaml
 
 # POC (point-of-contact) enrichment — per unique company, via TinyFish, runs
-# after classification. A company is looked up ONCE EVER (cached in
+# after clasFsification. A company is looked up ONCE EVER (cached in
 # poc_cache.db) — set force_refresh: true for one run to re-look-up
 # everything, then set it back to false.
 poc_enrichment:
-  enabled: true
+  enabled: false
   cap_per_run: 10          # max NEW companies looked up per run (cached/skipped companies don't count)
   force_refresh: false      # true = ignore the cache and re-look-up every company (costs TinyFish steps)
   cache_db: poc_cache.db
@@ -215,6 +222,21 @@ poc_enrichment:
   # You maintain this list — add more any time.
   blocklist:
     - Vaco
+    - Staffing
+    - Talent
+    - Recruit
+    - Personnel
+    - Search Partners
+    - Jobot
+    - Metasys
+    - SolomonEdwards
+    - Hire Score
+    - The Lee Group
+    - SourcePro
+    - Quantum Search
+    - Advice Personnel
+    - Sherwood
+    - Syntax
     - 3 Bridge Networks
     - Atlantic Group
     - LHH

@@ -32,7 +32,7 @@ from scanner.connectors.adapters.base import AggregatorAdapter
 from scanner.models import NormalizedJob
 
 log = logging.getLogger(__name__)
-ENDPOINT = "https://jsearch.p.rapidapi.com/search"
+ENDPOINT = "https://jsearch.p.rapidapi.com/search-v2"
 HOST = "jsearch.p.rapidapi.com"
 TIMEOUT = 30
 
@@ -85,7 +85,7 @@ class JSearchAdapter(AggregatorAdapter):
                 except (requests.RequestException, ValueError) as e:
                     log.warning("JSearch [%s] query %r failed: %s", cc, q, e)
                     continue
-                rows = data.get("data") or []
+                rows = (data.get("data") or {}).get("jobs") or []
                 log.info("JSearch [%s] %-34s %d roles", cc, repr(q), len(rows))
                 for j in rows:
                     jobs.append(NormalizedJob(
