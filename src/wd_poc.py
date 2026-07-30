@@ -12,6 +12,18 @@ Verified live 2026-07-30 against the real Apollo plan:
   Response people[] carry title/organization/id but name=None, email=None.
   POST /api/v1/people/match  {"id": <id>}  -- unlocks name + verified email.
   people/show 404s on this plan. Do not use.
+
+2026-07-31, also verified live: q_organization_domains_list finds far more
+people than q_organization_name for the same firm (78 vs 12 in one direct
+comparison), and the senior hit (a CFO) existed only in the domain-scoped
+result -- domain search now tries first when a domain is known, name search
+is the fallback. Apollo's org search also returns lookalike/divisional
+entities (a firm's holding company, a similarly-named unrelated firm), so
+every candidate's own organization.name is now fuzzy-matched against the
+target firm_name before it's eligible for ranking -- reusing
+lib_referral/matching/normalize.py's existing normalizer (NOT a new one,
+and that file is vendored/untouched) rather than trusting Apollo's org
+search to have already scoped correctly.
 """
 from __future__ import annotations
 
@@ -19,6 +31,8 @@ import re
 from typing import Callable, Optional
 
 import requests
+
+from lib_referral.matching import normalize as name_normalize
 
 SEARCH_URL = "https://api.apollo.io/api/v1/mixed_people/api_search"
 MATCH_URL = "https://api.apollo.io/api/v1/people/match"
@@ -65,10 +79,57 @@ def _search(headers: dict, body: dict) -> list[dict]:
     return (r.json() or {}).get("people") or []
 
 
-def _rank(people: list[dict]) -> Optional[dict]:
-    """Return the most senior finance person, or None."""
+def _org_name(person: dict) -> str:
+    org = person.get("organization") or {}
+    return org.get("name") or ""
+
+
+def _firm_matches(candidate_org_name: str, target_firm_name: str) -> bool:
+    """True if candidate_org_name plausibly names the same firm as
+    target_firm_name. Fuzzy via lib_referral's own normalizer
+    (meaningful_tokens -- suffix/generic words stripped, e.g. Capital,
+    Group, Management, Corp/Corporation), not a new one: set equality on
+    each side's meaningful tokens.
+
+    "Shinda Management Corp." and "Shinda Management Corporation" both
+    reduce to {"shinda"} (management/corp/corporation are all suffix
+    tokens) and match. "Wasatch Bridge Capital Group" reduces to
+    {"wasatch", "bridge"} while "Wasatch Group" reduces to just {"wasatch"}
+    -- not equal, correctly rejected, since "bridge" is a real
+    distinguishing token neither side's suffix list strips. Set comparison
+    rather than a joined-string comparison so token order doesn't matter
+    (Apollo's org name and the scanner's company name are not guaranteed to
+    order words the same way).
+
+    Known tradeoff, not a new bug: lib_referral's SUFFIX_TOKENS strips
+    "capital"/"group"/"management"/"real"/"estate" as generic words --
+    broader than wd_dbc.firm_key's deliberately narrow legal-forms-only
+    list (FIX 28's own protection against "Kairos Real Estate Partners"
+    colliding with "Kairos Investment Management"). Reusing lib_referral's
+    existing normalizer here, as instructed, inherits that broader
+    collision risk in this new context -- a firm named e.g. "Kairos Real
+    Estate" could still fuzzy-match an Apollo hit for "Kairos Management"
+    under this check. Not solved here: the instruction is to reuse the
+    existing normalizer, not write a new one.
+    """
+    if not candidate_org_name or not target_firm_name:
+        return False
+    a = set(name_normalize.meaningful_tokens(candidate_org_name))
+    b = set(name_normalize.meaningful_tokens(target_firm_name))
+    if not a or not b:
+        return False
+    return a == b
+
+
+def _rank(people: list[dict], firm_name: str) -> Optional[dict]:
+    """Return the most senior finance person whose own organization name
+    fuzzy-matches firm_name, or None. Filters to firm-matching candidates
+    once, up front, rather than inside the per-tier loop below (which
+    would otherwise re-check the same non-matching candidate once per
+    tier)."""
+    candidates = [p for p in people if _firm_matches(_org_name(p), firm_name)]
     for tier in TIERS:
-        for p in people:
+        for p in candidates:
             t = (p.get("title") or "").lower()
             if not t or EXCLUDE.search(t):
                 continue
@@ -81,6 +142,15 @@ def find_senior_poc(firm_name: str, domain: Optional[str] = None,
                     progress: Callable[[str], None] = _noop):
     """(name, email, title) for the senior finance contact, or None.
 
+    Search order: domain first when a domain is known, name as the
+    fallback. A live comparison for the same firm returned 78 people via
+    q_organization_domains_list against only 12 via q_organization_name,
+    and the senior hit (a CFO) existed only in the domain-scoped result --
+    domain search finds more and better candidates when it's available at
+    all. Falls back to q_organization_name when there is no domain, or the
+    domain search finds no senior-finance hit whose organization actually
+    matches firm_name.
+
     Two Apollo calls on success: one search, one match. The match spends a
     credit. Only email_status == "verified" is accepted.
     """
@@ -90,17 +160,23 @@ def find_senior_poc(firm_name: str, domain: Optional[str] = None,
         return None
     headers = _headers(key)
 
-    people = _search(headers, {"q_organization_name": firm_name, "per_page": 100})
-    hit = _rank(people)
+    seen_count = 0
+    hit = None
 
-    if not hit and domain:
-        people = _search(headers, {"q_organization_domains_list": [domain],
-                                   "per_page": 100})
-        hit = _rank(people)
+    if domain:
+        domain_people = _search(headers, {"q_organization_domains_list": [domain],
+                                          "per_page": 100})
+        seen_count += len(domain_people)
+        hit = _rank(domain_people, firm_name)
+
+    if not hit:
+        name_people = _search(headers, {"q_organization_name": firm_name, "per_page": 100})
+        seen_count += len(name_people)
+        hit = _rank(name_people, firm_name)
 
     if not hit:
         progress(f"{firm_name}: Apollo returned no senior finance title "
-                 f"({len(people)} people seen).")
+                 f"({seen_count} people seen).")
         return None
 
     r = requests.post(MATCH_URL, headers=headers, json={"id": hit["id"]},
