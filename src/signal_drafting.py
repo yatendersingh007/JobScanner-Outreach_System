@@ -22,6 +22,7 @@ from typing import Callable, Optional
 from lib_referral import apollo_enrich, config as gate_config, fact_check, gmail_client, testmode
 from . import wd_config as config
 from . import wd_dbc as dbc
+from . import wd_poc
 
 log = logging.getLogger("workflow-d.signal_drafting")
 
@@ -816,27 +817,37 @@ def _draft_one_firm(firm: dict, contacted_this_run: set[str], progress: Progress
     posting_url = next((p["url"] for p in postings if p.get("url")), "")
     short_name = firm_short(firm_name)
 
-    # KNOWN GAP (Prompt 3, recorded in BUILD_LOG.md): apollo_enrich.find_email
-    # can only resolve an email for a person it's already given a name for --
-    # it wraps Apollo's single-person people/match endpoint, not a title+
-    # company search. There is no senior-finance-titles-first discovery path;
-    # the scanner's poc_name_hint is the only candidate name this can ever
-    # act on. When there's no hint, the honest statement is "we have no way
-    # to find who runs finance here yet", not "this firm has no contact".
+    # POC discovery, in order: the scanner's poc_name_hint (a name hint only,
+    # never an email source) via apollo_enrich.find_email first. If there's
+    # no hint at all, or find_email can't resolve one, fall back to
+    # wd_poc.find_senior_poc's own Apollo mixed_people/api_search + match --
+    # this closes the gap BUILD_LOG.md previously recorded as unbuildable
+    # (see DRIFT.md/BUILD_LOG.md for the corrected endpoint finding).
     poc_name = next((p.get("poc_name_hint") for p in postings if p.get("poc_name_hint")), None)
-    if not poc_name:
-        reason = ("no POC name hint from the scanner, and Apollo search-by-title-and-"
-                  "company is not implemented (known gap, see BUILD_LOG.md) -- there is "
-                  "no way yet to find who runs finance at this firm")
-        progress(f"{firm_name}: {reason}.")
-        return "no_email", {**firm, "no_email_reason": reason}
+    poc_title = next((p.get("poc_designation_hint") for p in postings if p.get("poc_designation_hint")), None)
+    email = confidence = poc_source = None
 
-    email, confidence = apollo_enrich.find_email(
-        poc_name=poc_name, company_name=firm_name, domain=(research.get("domain") or None),
-        progress=progress,
-    )
+    if poc_name:
+        email, confidence = apollo_enrich.find_email(
+            poc_name=poc_name, company_name=firm_name, domain=(research.get("domain") or None),
+            progress=progress,
+        )
+        if email:
+            poc_source = "from_export" if confidence == "from_export" else "apollo"
+
     if not email:
-        reason = f"Apollo could not resolve an email for {poc_name} (scanner hint)"
+        hit = wd_poc.find_senior_poc(firm_name, research.get("domain") or None, progress=progress)
+        if hit:
+            poc_name, email, poc_title = hit
+            poc_source = "apollo_search"
+
+    if not email:
+        if poc_name:
+            reason = (f"Apollo could not resolve an email for {poc_name} (scanner hint), "
+                      "and its senior-finance-title search also found no verified contact")
+        else:
+            reason = ("no POC name hint from the scanner, and Apollo's senior-finance-title "
+                      "search also found no verified contact")
         progress(f"{firm_name}: {reason}.")
         return "no_email", {**firm, "no_email_reason": reason}
 
@@ -871,12 +882,11 @@ def _draft_one_firm(firm: dict, contacted_this_run: set[str], progress: Progress
         attach_path=deck_pdf_path, progress=progress,
     )
 
-    poc_title = next((p.get("poc_designation_hint") for p in postings if p.get("poc_designation_hint")), None)
     draft_row = dbc.create_wd_draft(
         firm_id,
         poc_name=poc_name, poc_email=email, poc_title=poc_title,
         poc_linkedin_url=None,
-        poc_source="from_export" if confidence == "from_export" else "apollo",
+        poc_source=poc_source,
         subject=email_content["subject"], body=email_content["body"],
         word_count=email_content["word_count"],
         thin_personalization=email_content["thin_personalization"],

@@ -59,6 +59,27 @@ relationship with zero code changes, and matches `src/wd_dbc.py`'s already-commi
 | lib_snapshot/drafting/__init__.py | referral-system | lib_snapshot/drafting/__init__.py | 078493a | none | n/a |
 | lib_snapshot/drafting/pitch_deck.py | referral-system | lib_snapshot/drafting/pitch_deck.py | 078493a | none — `build_pitch_deck()` and the `deck_gen/build_deck.js` path it shells out to are dead code in this vendor set (`deck_gen/` is absent on disk in the donor too); only `_BIG_MONEY_RE`/`_short_name` are actually used, by lib_referral/deck_filler.py | n/a |
 
+**2026-07-30: the Apollo senior-finance-POC-search gap (BUILD_LOG.md,
+"Prompt 3 follow-up" and "Narrow prior_contact_claim regex" entries) is
+closed — but not by editing `lib_referral/apollo_enrich.py` or
+`lib_snapshot/enrichment/apollo.py`, which both stay exactly as vendored
+(rows above and in lib_referral/'s table are unchanged, "none"). The gap is
+closed by `src/wd_poc.py`, a new, NOT-vendored Workflow D module that calls
+Apollo directly via its own `requests` calls, wired into
+`src/signal_drafting.py` as a fallback when `apollo_enrich.find_email` has
+no name to work with or can't resolve one. Both BUILD_LOG.md entries
+understated Apollo's real surface: they're right that no code anywhere in
+the vendored closure calls a search endpoint, but wrong to imply the
+account itself can't reach one. Verified live against the real plan (see
+`wd_poc.py`'s own module docstring): `POST /api/v1/mixed_people/api_search`
+IS reachable (finds organizations/titles, though the response's `name`/
+`email` fields come back null — a second `people/match` call by `id` is
+needed to unlock those). `POST /api/v1/mixed_people/search` is NOT reachable
+on this plan (alongside `people/bulk_match`, already known dead from
+Prompt 3's diagnose, and `people/show`, also confirmed dead). The two
+mixed_people endpoints are easy to conflate by name; they are not the same
+endpoint and this plan's access to them differs.**
+
 **Donor bug filed here, not yet filed upstream:** `migrate()`'s original
 `if mig_dir.exists() else []` silently treats a missing/misconfigured
 `MIGRATIONS_DIR` as "zero migrations to apply" — `apply_migrations()` then

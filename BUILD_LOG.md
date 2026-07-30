@@ -1248,3 +1248,95 @@ this entry's own provenance note above — if any of the reconstructed specs
 match what was actually intended, they're isolated enough in
 `scanner/connectors/tinyfish.py` to correct without touching the rest of
 this change.
+
+---
+
+## Closing the Apollo POC-search gap - 2026-07-30
+
+**Correction to the prior two entries** ("Prompt 3 follow-up: three fixes
+before prompt 4"'s Fix 2, and "Narrow prior_contact_claim regex; size the
+Apollo POC-search gap"'s section 2): both said, in effect, "Apollo cannot
+search by title and company on this plan." That overstated it. What was
+actually confirmed at the time was narrower and still true: no CODE in the
+vendored closure (`apollo_enrich.py`, `lib_snapshot/enrichment/apollo.py`)
+calls a search endpoint — only the single-person `people/match`. What
+wasn't checked, because it requires hitting the live API rather than
+reading source, is whether the ACCOUNT itself has access to one. It does,
+partially: `POST /api/v1/mixed_people/api_search` is reachable and finds
+organizations/people by name or domain (its response just doesn't include
+`name`/`email` directly — those need a follow-up `people/match` by `id`).
+`POST /api/v1/mixed_people/search` is NOT reachable on this plan. These are
+two distinct endpoints that happen to share the `mixed_people/` prefix; the
+earlier entries' "no search endpoint" framing didn't have the vocabulary to
+tell them apart because it never made a live call. See `DRIFT.md`'s
+2026-07-30 note for the full endpoint breakdown.
+
+**Built**: `src/wd_poc.py` (new, NOT vendored — no edits to
+`lib_referral/` or `lib_snapshot/` at all, confirmed by
+`git status` before committing this round). `find_senior_poc(firm_name,
+domain=None, progress=_noop) -> (name, email, title) | None`: one
+`mixed_people/api_search` call ranked by a seniority-ordered title tier
+list (CFO first, then Controller, then VP/Director/Head of Finance, then
+Finance Manager, then Accounting Manager — first tier with a hit wins,
+interns/coordinators/clerks excluded), then one `people/match` by `id` to
+unlock the name and email, accepting only `email_status == "verified"`.
+Two Apollo calls per firm on a hit, one on a miss.
+
+**Wired into `src/signal_drafting.py`'s `_draft_one_firm`**, replacing the
+old immediate bail. Order, exactly as specified: `poc_name_hint` (the
+scanner's TinyFish hint) with `apollo_enrich.find_email` first, since a
+scanner-observed name is a stronger, cheaper signal when it exists. If
+there's no hint at all, OR `find_email` can't resolve one, fall back to
+`wd_poc.find_senior_poc(firm_name, research.get("domain"))`. Only on a
+second `None` does it bail to `no_email` — and the reason string changed
+to match, since the gap is really closed now, not just relocated: "no POC
+name hint from the scanner, and Apollo's senior-finance-title search also
+found no verified contact" (no hint case) vs "Apollo could not resolve an
+email for `<name>` (scanner hint), and its senior-finance-title search also
+found no verified contact" (hint-present-but-unresolved case) — both
+distinct from each other, neither claims the gap is unbuildable anymore.
+`poc_source` gained a third value, `"apollo_search"`, alongside the
+existing `"from_export"`/`"apollo"`, so a `wd_drafts` row's provenance
+stays honest about which mechanism actually found this contact. When
+`find_senior_poc` succeeds after a hint existed but failed to resolve, its
+`(name, email, title)` REPLACES the scanner's hint entirely (the scanner
+never verified an email for that name; Apollo's own senior-title search
+did) rather than keeping the unresolved hint's name with a different
+email.
+
+**A real hazard found while verifying this, unrelated to the ask but
+blocking honest verification of it**: this environment's `.env` now carries
+`TEST_MODE=false` (from today's own live Apollo probing that produced
+`wd_poc.py`). `tests/test_signal_drafting.py` never forced `TEST_MODE=True`
+itself — it relied on the default — so every test in that file exercising
+`draft_email`/`_generate_blocks` without its own explicit
+`TEST_MODE=False` override was silently falling through to REAL LLM calls
+during `pytest` (confirmed: a single `draft_email()` call outside pytest,
+with `TEST_MODE=false` ambient, took 6 seconds; the file's full run went
+from ~2s to ~39s). Fixed with an `autouse=True` fixture at the top of the
+file forcing `TEST_MODE=True` by default; the handful of tests that
+deliberately want the real-mode generate/retry control flow already
+call `monkeypatch.setattr(sd.config, "TEST_MODE", False)` themselves, which
+runs after the fixture and correctly overrides it. `.env` itself was not
+touched — out of scope, and it's the user's own live-testing state, not
+something to revert silently.
+
+**Tests updated**: the two existing no-email tests
+(`test_draft_for_run_no_email_when_no_poc_hint` /
+`..._when_apollo_finds_nothing`) renamed to
+`..._and_senior_search_finds_nothing` and updated to also patch
+`sd.wd_poc.find_senior_poc` (via a new `senior_poc_hits` parameter on the
+file's `_patch_common` helper, defaulting to "no hit" so no test makes a
+live call unless it explicitly opts in) and to assert the new two-mechanism
+reason text, including `"not implemented" not in reason` on the no-hint
+case specifically, so a future regression back to the old "gap" framing
+would fail loudly. Two new tests added for the fallback actually
+succeeding: `test_draft_for_run_falls_back_to_senior_poc_search_when_hint_missing`
+and `..._when_hint_email_unresolved`, both asserting the drafted row's
+`poc_name`/`poc_email`/`poc_title`/`poc_source` come from the
+`find_senior_poc` hit.
+
+Tests: 267 passed (delta +2: the two no-hint tests were renamed in place,
+not added; +2 new fallback-success tests). 0 failures.
+
+Not started: prompt 4 (deck), still.

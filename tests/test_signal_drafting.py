@@ -22,6 +22,20 @@ import pytest
 from src import signal_drafting as sd
 
 
+@pytest.fixture(autouse=True)
+def _default_test_mode_true(monkeypatch):
+    """This environment's .env can carry TEST_MODE=false for live Apollo
+    probing (see src/wd_poc.py's docstring) -- without forcing it back to
+    True here, every test in this file that doesn't explicitly want the
+    real-LLM control flow would silently fall through to real, slow, costly
+    API calls during pytest instead of the deterministic fixture-or-fallback
+    branch these tests are written against. The handful of tests that DO
+    want the real-mode control flow (e.g. _generate_blocks's hard-fail/retry
+    tests) call monkeypatch.setattr(sd.config, "TEST_MODE", False) themselves
+    afterward, which wins over this fixture."""
+    monkeypatch.setattr(sd.config, "TEST_MODE", True)
+
+
 # ---------------------------------------------------------------------------
 # Forbidden claims: must-fire matrix
 # ---------------------------------------------------------------------------
@@ -472,7 +486,7 @@ def _posting(title="Fund Controller", url="https://x.example/1", poc="Jane Doe",
     return {"title": title, "url": url, "poc_name_hint": poc, "poc_designation_hint": desig}
 
 
-def _patch_common(monkeypatch, firms, postings_by_id, emails_by_name):
+def _patch_common(monkeypatch, firms, postings_by_id, emails_by_name, senior_poc_hits=None):
     monkeypatch.setattr(sd.dbc, "firms_for_run", lambda run_id: firms)
     monkeypatch.setattr(sd.dbc, "postings_for_firm", lambda fid: postings_by_id.get(fid, []))
     monkeypatch.setattr(sd.dbc, "cancel_requested", lambda run_id: False)
@@ -490,6 +504,18 @@ def _patch_common(monkeypatch, firms, postings_by_id, emails_by_name):
         return hit if hit else (None, None)
 
     monkeypatch.setattr(sd.apollo_enrich, "find_email", fake_find_email)
+
+    # wd_poc.find_senior_poc hits the live Apollo API with no fake -- a real
+    # APOLLO_API_KEY is configured in this environment's .env, so an
+    # unmocked call here is a genuine network request during pytest, not a
+    # hypothetical. Defaults to "no hit" (None) unless a test explicitly
+    # wants the fallback to succeed via senior_poc_hits={firm_name: (name,
+    # email, title)}.
+    def fake_find_senior_poc(firm_name, domain=None, progress=None):
+        return (senior_poc_hits or {}).get(firm_name)
+
+    monkeypatch.setattr(sd.wd_poc, "find_senior_poc", fake_find_senior_poc)
+
     monkeypatch.setattr(sd.gmail_client, "create_draft",
                         lambda to, subject, body, attach_path=None, progress=None:
                         {"draft_id": f"DRAFT-{to}", "attached": False})
@@ -530,30 +556,33 @@ def test_draft_for_run_stops_at_cancel_between_firms(monkeypatch):
     assert len(result.drafted) == 1  # Firm A finished cleanly, Firm B never started
 
 
-def test_draft_for_run_no_email_when_no_poc_hint(monkeypatch):
-    """apollo_enrich cannot search by title and company (confirmed gap, see
-    BUILD_LOG.md) -- with no scanner hint at all, the reason must say so
-    plainly, not read like the firm simply has no one to contact."""
+def test_draft_for_run_no_email_when_no_poc_hint_and_senior_search_finds_nothing(monkeypatch):
+    """No scanner hint at all now falls back to wd_poc.find_senior_poc
+    (closes the gap the old reason described as unbuildable). When THAT
+    also finds nothing, the reason must say both were tried, not read like
+    the firm simply has no one to contact."""
     firms = [_firm(1, "Firm A")]
     postings = {1: [{"title": "Fund Controller", "url": "https://x.example", "poc_name_hint": None,
                      "poc_designation_hint": None}]}
-    _patch_common(monkeypatch, firms, postings, {})
+    _patch_common(monkeypatch, firms, postings, {})  # senior_poc_hits defaults to no hit
 
     result = sd.draft_for_run(run_id=1)
 
     assert len(result.no_email) == 1
     assert result.drafted == []
     reason = result.no_email[0]["no_email_reason"]
-    assert "no way yet to find who runs finance" in reason
-    assert "search-by-title-and-company is not implemented" in reason
+    assert "no POC name hint from the scanner" in reason
+    assert "senior-finance-title search also found no verified contact" in reason
+    assert "not implemented" not in reason  # the gap is closed now
 
 
-def test_draft_for_run_no_email_when_apollo_finds_nothing(monkeypatch):
-    """A distinct reason from the no-hint case: there WAS a candidate name,
-    Apollo just couldn't resolve an email for it."""
+def test_draft_for_run_no_email_when_hint_unresolved_and_senior_search_finds_nothing(monkeypatch):
+    """A distinct reason from the no-hint case: there WAS a candidate name
+    from the scanner, apollo_enrich couldn't resolve it, AND the
+    senior-finance-title fallback also found nothing."""
     firms = [_firm(1, "Firm A")]
     postings = {1: [_posting(poc="Poc A")]}
-    _patch_common(monkeypatch, firms, postings, {})  # no email in the fixture map
+    _patch_common(monkeypatch, firms, postings, {})  # no email in the fixture map, no senior hit
 
     result = sd.draft_for_run(run_id=1)
 
@@ -561,6 +590,43 @@ def test_draft_for_run_no_email_when_apollo_finds_nothing(monkeypatch):
     reason = result.no_email[0]["no_email_reason"]
     assert "Poc A" in reason
     assert "could not resolve an email" in reason
+    assert "senior-finance-title search also found no verified contact" in reason
+
+
+def test_draft_for_run_falls_back_to_senior_poc_search_when_hint_missing(monkeypatch):
+    """The new fallback path succeeding: no scanner hint, but
+    wd_poc.find_senior_poc finds a verified senior finance contact."""
+    firms = [_firm(1, "Firm A")]
+    postings = {1: [{"title": "Fund Controller", "url": "https://x.example", "poc_name_hint": None,
+                     "poc_designation_hint": None}]}
+    hits = {"Firm A": ("Alex Kim", "alex@firma.example", "Chief Financial Officer")}
+    _patch_common(monkeypatch, firms, postings, {}, senior_poc_hits=hits)
+
+    result = sd.draft_for_run(run_id=1)
+
+    assert len(result.drafted) == 1
+    assert result.no_email == []
+    row = result.drafted[0]
+    assert row["poc_name"] == "Alex Kim"
+    assert row["poc_email"] == "alex@firma.example"
+    assert row["poc_title"] == "Chief Financial Officer"
+    assert row["poc_source"] == "apollo_search"
+
+
+def test_draft_for_run_falls_back_to_senior_poc_search_when_hint_email_unresolved(monkeypatch):
+    """The scanner hint exists but apollo_enrich can't resolve an email for
+    it -- the senior-finance-title search still gets a chance."""
+    firms = [_firm(1, "Firm A")]
+    postings = {1: [_posting(poc="Poc A")]}  # hint present, no email in the fixture map
+    hits = {"Firm A": ("Alex Kim", "alex@firma.example", "Controller")}
+    _patch_common(monkeypatch, firms, postings, {}, senior_poc_hits=hits)
+
+    result = sd.draft_for_run(run_id=1)
+
+    assert len(result.drafted) == 1
+    row = result.drafted[0]
+    assert row["poc_name"] == "Alex Kim"  # replaced by the senior-search hit, not "Poc A"
+    assert row["poc_source"] == "apollo_search"
 
 
 def test_draft_for_run_within_run_duplicate_blocks(monkeypatch):
