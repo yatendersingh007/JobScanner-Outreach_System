@@ -214,7 +214,9 @@ def scan(recency_days: int = 1, progress: Progress = _noop):
     """
     from scanner import pipeline as scanner_pipeline
     from scanner import config as scanner_config
+    from . import jsearch_pool
 
+    jsearch_pool.install()
     cfg = scanner_config.load(config.SCANNER_CONFIG_PATH)
 
     # Assert rather than mutate on disk. If someone edits config.yaml to
