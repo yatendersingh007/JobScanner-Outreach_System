@@ -1,4 +1,5 @@
 ﻿.env
+.env.backup
 token.json
 credentials.json
 *.db
@@ -6,3 +7,17 @@ output/
 .venv/
 __pycache__/
 connections.csv
+
+# ad-hoc debugging/exploration scripts and their scratch output, not part
+# of the build -- root-anchored so this never shadows a real, tracked file
+# nested elsewhere in the tree (e.g. lib_referral/apollo_enrich.py).
+/apollo_*.py
+/cols.py
+/fixdbc.py
+/gate.py
+/tav.py
+/test_poc.py
+/v12.py
+/void_wasatch.py
+/raw.json
+/qa_out/
