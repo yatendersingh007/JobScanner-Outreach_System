@@ -21,3 +21,7 @@ connections.csv
 /void_wasatch.py
 /raw.json
 /qa_out/
+qualified.py
+shinda_check.py
+seen.db.bak
+qa_out/
