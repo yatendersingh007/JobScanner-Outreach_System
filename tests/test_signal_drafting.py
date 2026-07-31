@@ -738,106 +738,306 @@ def test_generate_deck_forces_tokens_used_to_the_cap_to_suppress_the_retry(monke
 
 
 # ---------------------------------------------------------------------------
-# _patch_dangling_labels: run 27, Choice NY live evidence -- slide 3's fixed
-# "Founded"/"Investing since"/"Capital stack complexity:  " labels rendered
-# dangling (no value) since they aren't slots in pitch_slots.json at all.
+# _drop_oneliner_duplicate_bullets: run 27 follow-up, Choice NY live
+# evidence -- slide 01 repeated the italic headline verbatim as the bullet
+# "Firm described as <the exact same oneliner text>". deck_filler.py's own
+# _drop_oneliner_duplicate (vendored) exists for exactly this shape of
+# waste but only does an exact-string compare, which the "Firm described
+# as " lead-in defeats.
 # ---------------------------------------------------------------------------
-def _make_test_pptx(tmp_path, slide_xml, name="test.pptx"):
+_ONELINER = "Residential & mixed-use property management, third-party operator"
+
+
+def test_strip_oneliner_lead_in_removes_the_live_observed_prefix():
+    assert sd._strip_oneliner_lead_in(f"Firm described as {_ONELINER}") == _ONELINER
+
+
+@pytest.mark.parametrize("prefix", [
+    "Firm described as ",
+    "The firm is described as ",
+    "Company described as ",
+    "The company is described as ",
+    "Described as ",
+])
+def test_strip_oneliner_lead_in_removes_known_prefixes_case_insensitively(prefix):
+    assert sd._strip_oneliner_lead_in(f"{prefix.upper()}{_ONELINER}") == _ONELINER
+
+
+def test_strip_oneliner_lead_in_leaves_unrelated_text_alone():
+    text = "Sold to Associa Corp. in 2021 with an earn-out noted"
+    assert sd._strip_oneliner_lead_in(text) == text
+
+
+def test_drop_oneliner_duplicate_bullets_removes_the_live_observed_case():
+    bullets = [
+        "Operates in the New York metropolitan area",
+        f"Firm described as {_ONELINER}",
+        "Manages assets valued at over $250 million",
+    ]
+
+    result = sd._drop_oneliner_duplicate_bullets(bullets, _ONELINER)
+
+    assert result == [
+        "Operates in the New York metropolitan area",
+        "Manages assets valued at over $250 million",
+    ]
+
+
+def test_drop_oneliner_duplicate_bullets_keeps_a_verbatim_duplicate_too():
+    """A bullet identical to the oneliner with no prefix at all must still
+    be caught -- this is a strict superset of the vendored guard's own
+    exact-match behavior, not a replacement that narrows it."""
+    bullets = ["Operates in the New York metropolitan area", _ONELINER]
+
+    result = sd._drop_oneliner_duplicate_bullets(bullets, _ONELINER)
+
+    assert result == ["Operates in the New York metropolitan area"]
+
+
+def test_drop_oneliner_duplicate_bullets_keeps_genuinely_distinct_bullets():
+    bullets = ["Operates in the New York metropolitan area", "Founded in 1970"]
+
+    result = sd._drop_oneliner_duplicate_bullets(bullets, _ONELINER)
+
+    assert result == bullets
+
+
+def test_drop_oneliner_duplicate_bullets_handles_empty_oneliner():
+    bullets = ["Operates in the New York metropolitan area"]
+
+    assert sd._drop_oneliner_duplicate_bullets(bullets, "") == bullets
+
+
+def test_drop_oneliner_duplicate_bullets_handles_no_bullets():
+    assert sd._drop_oneliner_duplicate_bullets(None, _ONELINER) == []
+    assert sd._drop_oneliner_duplicate_bullets([], _ONELINER) == []
+
+
+def test_generate_deck_strips_the_duplicate_oneliner_bullet_before_build(monkeypatch):
+    monkeypatch.setattr(
+        sd.deck_filler, "get_deck_content",
+        lambda firm_name, research, personalization: {
+            "profile_bullets": [
+                "Operates in the New York metropolitan area",
+                f"Firm described as {_ONELINER}",
+            ],
+        },
+    )
+    captured = {}
+
+    def fake_build_and_convert(firm_name, research, deck_content, progress=None, personalization=None):
+        captured["profile_bullets"] = list(deck_content.get("profile_bullets") or [])
+        return {"pptx_path": None, "pdf_path": "x.pdf", "fill_data": {}}
+
+    monkeypatch.setattr(sd.deck_filler, "build_and_convert", fake_build_and_convert)
+
+    sd._generate_deck("Choice NY", {"firm_oneliner": _ONELINER}, progress=lambda m: None)
+
+    assert captured["profile_bullets"] == ["Operates in the New York metropolitan area"]
+
+
+def test_generate_deck_leaves_bullets_alone_when_research_has_no_oneliner(monkeypatch):
+    bullets = ["Operates in the New York metropolitan area", "Firm described as something"]
+    monkeypatch.setattr(sd.deck_filler, "get_deck_content",
+                        lambda firm_name, research, personalization: {"profile_bullets": list(bullets)})
+    captured = {}
+
+    def fake_build_and_convert(firm_name, research, deck_content, progress=None, personalization=None):
+        captured["profile_bullets"] = list(deck_content.get("profile_bullets") or [])
+        return {"pptx_path": None, "pdf_path": "x.pdf", "fill_data": {}}
+
+    monkeypatch.setattr(sd.deck_filler, "build_and_convert", fake_build_and_convert)
+
+    sd._generate_deck("Acme", {}, progress=lambda m: None)
+
+    assert captured["profile_bullets"] == bullets
+
+
+# ---------------------------------------------------------------------------
+# _delete_empty_deck_shapes: run 27 follow-up, Choice NY + Neal Communities
+# live evidence -- blanking a label's text run (the first version of this
+# fix) left the card/footer CONTAINER shape still rendering as an empty
+# beige box or navy bar. The whole shape sequence must be deleted instead.
+# Fixture mirrors the real master's slide 3 structure exactly (verified
+# against both real generated decks in generated_decks_c/ before writing
+# this): an AUM card (Shape 4 + Text 5/6/7), a Founded card (Shape 8 +
+# Text 9/10/11), and a capital-stack footer (Shape 12 + Text 13).
+# ---------------------------------------------------------------------------
+def _shape(shape_id, name, text=None):
+    body = "" if text is None else f'<p:txBody><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody>'
+    return (f'<p:sp><p:nvSpPr><p:cNvPr id="{shape_id}" name="{name}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>'
+           f'<p:spPr/>{body}</p:sp>')
+
+
+def _slide3_xml(aum_value="", aum_label="", aum_asof="", founded_year="", capital_stack="",
+                extra_shapes=""):
+    return (
+        "<p:sld>"
+        + _shape(2, "Text 0", "SECTION 01")
+        + _shape(6, "Shape 4")                                              # AUM card container
+        + _shape(7, "Text 5", aum_value)
+        + _shape(8, "Text 6", aum_label)
+        + _shape(9, "Text 7", aum_asof)
+        + _shape(10, "Shape 8")                                             # Founded card container
+        + _shape(11, "Text 9", founded_year)
+        + _shape(12, "Text 10", "Founded" if founded_year else "")
+        + _shape(13, "Text 11", "Investing since" if founded_year else "")
+        + _shape(14, "Shape 12")                                            # capital-stack footer container
+        + _shape(15, "Text 13", capital_stack)
+        + extra_shapes
+        + "</p:sld>"
+    )
+
+
+def _make_test_pptx(tmp_path, member_xml, member="ppt/slides/slide3.xml", name="test.pptx",
+                    extra_members=None):
     path = tmp_path / name
     with zipfile.ZipFile(path, "w") as z:
-        z.writestr("ppt/slides/slide1.xml", slide_xml)
+        z.writestr(member, member_xml)
+        for extra_member, extra_xml in (extra_members or {}).items():
+            z.writestr(extra_member, extra_xml)
     return path
 
 
-def _slide_runs(pptx_path, member="ppt/slides/slide1.xml"):
+def _shape_names(pptx_path, member="ppt/slides/slide3.xml"):
     with zipfile.ZipFile(pptx_path) as z:
         xml = z.read(member).decode("utf-8")
-    return re.findall(r"<a:t>(.*?)</a:t>", xml)
+    return re.findall(r'<p:cNvPr id="\d+" name="([^"]*)"', xml)
 
 
-_SAMPLE_SLIDE_XML = (
-    "<p:sld><a:t>2008</a:t><a:t>Founded</a:t><a:t>Investing since</a:t>"
-    "<a:t>Capital stack complexity:  </a:t><a:t>LP, GP, Co-GP</a:t></p:sld>"
-)
-
-
-def test_patch_dangling_labels_blanks_labels_when_values_are_empty(tmp_path):
-    path = _make_test_pptx(tmp_path, _SAMPLE_SLIDE_XML)
-
-    changed = sd._patch_dangling_labels(path, {"founded_year": "", "capital_stack": ""})
-
-    assert changed is True
-    runs = _slide_runs(path)
-    assert "Founded" not in runs
-    assert "Investing since" not in runs
-    assert "Capital stack complexity:  " not in runs
-
-
-def test_patch_dangling_labels_leaves_labels_alone_when_values_present(tmp_path):
-    path = _make_test_pptx(tmp_path, _SAMPLE_SLIDE_XML)
-
-    changed = sd._patch_dangling_labels(path, {"founded_year": "2008", "capital_stack": "LP, GP"})
-
-    assert changed is False
-    runs = _slide_runs(path)
-    assert "Founded" in runs
-    assert "Investing since" in runs
-    assert "Capital stack complexity:  " in runs
-
-
-def test_patch_dangling_labels_blanks_only_the_label_with_an_empty_value(tmp_path):
-    path = _make_test_pptx(tmp_path, _SAMPLE_SLIDE_XML)
-
-    changed = sd._patch_dangling_labels(path, {"founded_year": "2008", "capital_stack": ""})
-
-    assert changed is True
-    runs = _slide_runs(path)
-    assert "Founded" in runs                          # founded_year present -- left alone
-    assert "Investing since" in runs
-    assert "Capital stack complexity:  " not in runs   # capital_stack empty -- blanked
-
-
-def test_patch_dangling_labels_skips_a_label_that_is_not_unique_on_a_slide(tmp_path):
-    """Same "don't guess" posture as fill_deck()'s own slot-fill: a locator
-    that appears more than once on a slide is left untouched rather than
-    risking the wrong run."""
-    xml = _SAMPLE_SLIDE_XML + "<a:t>Founded</a:t>"
+def test_delete_empty_deck_shapes_neal_regression_no_disclosed_aum(tmp_path):
+    """Neal Communities live evidence: no disclosed AUM at all -- the whole
+    AUM card (container + all 3 content shapes) is removed; the Founded
+    card (real founded_year) stays."""
+    xml = _slide3_xml(aum_value="", aum_label="", aum_asof="", founded_year="1970", capital_stack="")
     path = _make_test_pptx(tmp_path, xml)
 
-    changed = sd._patch_dangling_labels(path, {"founded_year": "", "capital_stack": ""})
+    changed = sd._delete_empty_deck_shapes(path, {
+        "aum_value": "", "aum_label": "", "aum_asof": "", "founded_year": "1970", "capital_stack": "",
+    })
 
-    assert changed is True   # "Investing since" still unique, still blanked
-    runs = _slide_runs(path)
-    assert runs.count("Founded") == 2          # ambiguous, left untouched
-    assert "Investing since" not in runs
+    assert changed is True
+    names = _shape_names(path)
+    assert "Shape 4" not in names and "Text 5" not in names and "Text 6" not in names and "Text 7" not in names
+    assert "Shape 8" in names and "Text 9" in names
 
 
-def test_patch_dangling_labels_returns_false_when_nothing_to_blank(tmp_path):
-    path = _make_test_pptx(tmp_path, "<p:sld><a:t>hello</a:t></p:sld>")
+def test_delete_empty_deck_shapes_choice_ny_regression_no_founding_year_or_capital_stack(tmp_path):
+    """Choice NY live evidence: AUM is disclosed (card stays), founded_year
+    and capital_stack are both empty (their card and footer both go)."""
+    xml = _slide3_xml(aum_value="$250 million", aum_label="Assets Valued", aum_asof="",
+                      founded_year="", capital_stack="")
+    path = _make_test_pptx(tmp_path, xml)
 
-    changed = sd._patch_dangling_labels(path, {"founded_year": "2008", "capital_stack": "LP, GP"})
+    changed = sd._delete_empty_deck_shapes(path, {
+        "aum_value": "$250 million", "aum_label": "Assets Valued", "aum_asof": "",
+        "founded_year": "", "capital_stack": "",
+    })
+
+    assert changed is True
+    names = _shape_names(path)
+    assert "Shape 4" in names and "Text 5" in names                # AUM card stays -- real content
+    assert "Shape 8" not in names and "Text 9" not in names        # Founded card gone
+    assert "Text 10" not in names and "Text 11" not in names
+    assert "Shape 12" not in names and "Text 13" not in names      # capital-stack footer gone
+
+
+def test_delete_empty_deck_shapes_keeps_a_card_with_only_one_empty_field(tmp_path):
+    """aum_asof blank but aum_value/aum_label populated is NOT "every value
+    empty" -- the card must stay, matching the pre-existing, already-
+    accepted behavior of a single blank caption line inside an otherwise
+    populated card."""
+    xml = _slide3_xml(aum_value="$4.4B", aum_label="Gross Asset Value", aum_asof="",
+                      founded_year="2008", capital_stack="LP, GP")
+    path = _make_test_pptx(tmp_path, xml)
+
+    changed = sd._delete_empty_deck_shapes(path, {
+        "aum_value": "$4.4B", "aum_label": "Gross Asset Value", "aum_asof": "",
+        "founded_year": "2008", "capital_stack": "LP, GP",
+    })
+
+    assert changed is False
+    names = _shape_names(path)
+    assert "Shape 4" in names and "Shape 8" in names and "Shape 12" in names
+
+
+def test_delete_empty_deck_shapes_returns_false_when_everything_is_populated(tmp_path):
+    xml = _slide3_xml(aum_value="$4.4B", aum_label="Gross Asset Value", aum_asof="as of Dec 31, 2025",
+                      founded_year="2008", capital_stack="LP, GP")
+    path = _make_test_pptx(tmp_path, xml)
+
+    changed = sd._delete_empty_deck_shapes(path, {
+        "aum_value": "$4.4B", "aum_label": "Gross Asset Value", "aum_asof": "as of Dec 31, 2025",
+        "founded_year": "2008", "capital_stack": "LP, GP",
+    })
 
     assert changed is False
 
 
-def test_patch_dangling_labels_treats_none_fill_data_as_all_empty(tmp_path):
-    path = _make_test_pptx(tmp_path, _SAMPLE_SLIDE_XML)
+def test_delete_empty_deck_shapes_treats_none_fill_data_as_all_empty(tmp_path):
+    path = _make_test_pptx(tmp_path, _slide3_xml())
 
-    changed = sd._patch_dangling_labels(path, None)
+    changed = sd._delete_empty_deck_shapes(path, None)
 
     assert changed is True
-    assert "Founded" not in _slide_runs(path)
+    assert _shape_names(path) == ["Text 0"]   # all three groups deleted
 
 
-def test_generate_deck_reconverts_to_pdf_after_patching_dangling_labels(tmp_path, monkeypatch):
-    pptx_path = _make_test_pptx(tmp_path, _SAMPLE_SLIDE_XML)
+def test_delete_empty_deck_shapes_is_atomic_per_group(tmp_path):
+    """A group whose shape names can't ALL be uniquely resolved is left
+    entirely alone -- not partially deleted. Partial deletion (content
+    gone, an ambiguous container orphaned behind) would read worse on the
+    slide than leaving the whole group untouched. Caught in testing before
+    this reached the codebase: an earlier, per-shape (non-atomic) version
+    would have deleted "Text 5/6/7" here even with "Shape 4" ambiguous."""
+    xml = _slide3_xml(aum_value="", aum_label="", aum_asof="", founded_year="1970", capital_stack="",
+                      extra_shapes=_shape(66, "Shape 4"))   # duplicate AUM container name
+    path = _make_test_pptx(tmp_path, xml)
+
+    changed = sd._delete_empty_deck_shapes(path, {
+        "aum_value": "", "aum_label": "", "aum_asof": "", "founded_year": "1970", "capital_stack": "",
+    })
+
+    assert changed is True   # capital-stack group still resolves fine
+    names = _shape_names(path)
+    assert names.count("Shape 4") == 2   # ambiguous AUM group untouched, including its content
+    assert "Text 5" in names and "Text 6" in names and "Text 7" in names
+    assert "Shape 8" in names            # Founded card: real content, never a deletion candidate
+    assert "Shape 12" not in names       # capital_stack empty, unambiguous -- still deleted
+
+
+def test_delete_empty_deck_shapes_scopes_deletion_to_the_correct_slide_only(tmp_path):
+    """Regression: these autogenerated shape names ("Text 5", "Shape 8",
+    ...) are NOT unique across the whole presentation -- every slide's own
+    shapes restart around the same low numbers. An earlier draft of this
+    fix, caught in testing before it ever reached the codebase, matched
+    shape names across EVERY slide.xml in the deck and deleted unrelated
+    content elsewhere."""
+    xml = _slide3_xml(aum_value="", aum_label="", aum_asof="", founded_year="1970", capital_stack="")
+    other_slide_xml = "<p:sld>" + _shape(99, "Text 5", "unrelated content on another slide") + "</p:sld>"
+    path = _make_test_pptx(tmp_path, xml, extra_members={"ppt/slides/slide7.xml": other_slide_xml})
+
+    sd._delete_empty_deck_shapes(path, {
+        "aum_value": "", "aum_label": "", "aum_asof": "", "founded_year": "1970", "capital_stack": "",
+    })
+
+    with zipfile.ZipFile(path) as z:
+        other_xml = z.read("ppt/slides/slide7.xml").decode("utf-8")
+    assert "unrelated content on another slide" in other_xml
+    assert "Text 5" in other_xml   # untouched, even though slide3's own "Text 5" was deleted
+
+
+def test_generate_deck_reconverts_to_pdf_after_deleting_empty_shapes(tmp_path, monkeypatch):
+    xml = _slide3_xml(aum_value="", aum_label="", aum_asof="", founded_year="1970", capital_stack="")
+    pptx_path = _make_test_pptx(tmp_path, xml)
     monkeypatch.setattr(sd.deck_filler, "get_deck_content",
                         lambda firm_name, research, personalization: {"profile_bullets": []})
     monkeypatch.setattr(
         sd.deck_filler, "build_and_convert",
         lambda firm_name, research, deck_content, progress=None, personalization=None: {
             "pptx_path": pptx_path, "pdf_path": "stale.pdf",
-            "fill_data": {"founded_year": "", "capital_stack": ""},
+            "fill_data": {"aum_value": "", "aum_label": "", "aum_asof": "",
+                         "founded_year": "1970", "capital_stack": ""},
         },
     )
     convert_calls = []
@@ -848,18 +1048,21 @@ def test_generate_deck_reconverts_to_pdf_after_patching_dangling_labels(tmp_path
 
     assert result == "fresh.pdf"
     assert convert_calls == [pptx_path]
-    assert "Founded" not in _slide_runs(pptx_path)
+    assert "Shape 4" not in _shape_names(pptx_path)
 
 
-def test_generate_deck_skips_reconversion_when_nothing_needed_patching(tmp_path, monkeypatch):
-    pptx_path = _make_test_pptx(tmp_path, _SAMPLE_SLIDE_XML)
+def test_generate_deck_skips_reconversion_when_nothing_needed_deleting(tmp_path, monkeypatch):
+    xml = _slide3_xml(aum_value="$4.4B", aum_label="Gross Asset Value", aum_asof="as of Dec 31, 2025",
+                      founded_year="2008", capital_stack="LP, GP")
+    pptx_path = _make_test_pptx(tmp_path, xml)
     monkeypatch.setattr(sd.deck_filler, "get_deck_content",
                         lambda firm_name, research, personalization: {"profile_bullets": []})
     monkeypatch.setattr(
         sd.deck_filler, "build_and_convert",
         lambda firm_name, research, deck_content, progress=None, personalization=None: {
             "pptx_path": pptx_path, "pdf_path": "original.pdf",
-            "fill_data": {"founded_year": "2008", "capital_stack": "LP, GP"},
+            "fill_data": {"aum_value": "$4.4B", "aum_label": "Gross Asset Value",
+                         "aum_asof": "as of Dec 31, 2025", "founded_year": "2008", "capital_stack": "LP, GP"},
         },
     )
     convert_calls = []
@@ -872,8 +1075,8 @@ def test_generate_deck_skips_reconversion_when_nothing_needed_patching(tmp_path,
     assert convert_calls == []
 
 
-def test_generate_deck_falls_back_to_original_pdf_when_patch_raises(monkeypatch):
-    """A label-patch failure (e.g. an inaccessible file) must ship the
+def test_generate_deck_falls_back_to_original_pdf_when_shape_cleanup_raises(monkeypatch):
+    """A shape-cleanup failure (e.g. an inaccessible file) must ship the
     deck's original PDF, never crash the draft."""
     monkeypatch.setattr(sd.deck_filler, "get_deck_content",
                         lambda firm_name, research, personalization: {"profile_bullets": []})
@@ -881,7 +1084,8 @@ def test_generate_deck_falls_back_to_original_pdf_when_patch_raises(monkeypatch)
         sd.deck_filler, "build_and_convert",
         lambda firm_name, research, deck_content, progress=None, personalization=None: {
             "pptx_path": "does/not/exist.pptx", "pdf_path": "original.pdf",
-            "fill_data": {"founded_year": "", "capital_stack": ""},
+            "fill_data": {"aum_value": "", "aum_label": "", "aum_asof": "",
+                         "founded_year": "", "capital_stack": ""},
         },
     )
     progressed = []
@@ -889,7 +1093,7 @@ def test_generate_deck_falls_back_to_original_pdf_when_patch_raises(monkeypatch)
     result = sd._generate_deck("Acme Capital", {}, progress=progressed.append)
 
     assert result == "original.pdf"
-    assert any("dangling-label patch failed" in msg for msg in progressed)
+    assert any("empty-shape cleanup failed" in msg for msg in progressed)
 
 
 def test_draft_for_run_respects_draft_cap(monkeypatch):

@@ -312,6 +312,87 @@ def test_qualify_updates_a_parked_firm_in_band(monkeypatch, wire):
     assert "Qualified" in wire.sent[0]
 
 
+def test_qualify_writes_aum_fields_into_research_in_icp_gates_own_shape(monkeypatch, wire):
+    """Live evidence: wd_firms id 72 (Neal Communities) was qualified /
+    AUM_CONFIRMED with icp_reason stating the operator-verified figure, but
+    research["aum_display"]/aum_value_usd/disclosed_figure/disclosed_label
+    were all ""/None -- the deck's AUM stat tile reads ONLY from research,
+    never from icp_reason, so it rendered blank. The AUM figure must reach
+    research in the same shape icp_gate.py itself produces."""
+    monkeypatch.setattr(bot.dbc, "parked_firm_by_name",
+                        lambda name: {"id": 72, "firm_name": name, "research": {}})
+    updated = []
+    monkeypatch.setattr(bot.dbc, "update_wd_firm", lambda firm_id, **k: updated.append((firm_id, k)))
+
+    bot._handle_qualify('"Neal Communities" 700M')
+
+    research = updated[0][1]["research"]
+    assert research["aum_value_usd"] == 700_000_000
+    assert research["disclosed_figure"] == "$700M"
+    assert research["disclosed_label"]
+    assert research["aum_display"] == "$700M (assets under management)"
+    assert research["aum_tag"] == "AUM_CONFIRMED"
+
+
+def test_qualify_preserves_existing_research_fields(monkeypatch, wire):
+    """The original park already gathered real research (domain, sources,
+    geography, founded_year, firm_oneliner, ...) -- /qualify must only add/
+    update the AUM-related keys, never discard the rest."""
+    existing_research = {
+        "domain": "nealcommunities.com",
+        "geography": "Southwest Florida (Sarasota/Lakewood Ranch), US",
+        "founded_year": "1970",
+        "firm_oneliner": "Homebuilder/developer focusing on single-family and townhome communities",
+        "sources": ["https://nealcommunities.com"],
+        "aum_tag": "AUM_UNVERIFIED",   # the stale value this fix must overwrite
+        "disclosed_figure": "",
+    }
+    monkeypatch.setattr(bot.dbc, "parked_firm_by_name",
+                        lambda name: {"id": 72, "firm_name": name, "research": dict(existing_research)})
+    updated = []
+    monkeypatch.setattr(bot.dbc, "update_wd_firm", lambda firm_id, **k: updated.append((firm_id, k)))
+
+    bot._handle_qualify('"Neal Communities" 700M')
+
+    research = updated[0][1]["research"]
+    assert research["domain"] == "nealcommunities.com"
+    assert research["geography"] == "Southwest Florida (Sarasota/Lakewood Ranch), US"
+    assert research["founded_year"] == "1970"
+    assert research["firm_oneliner"] == existing_research["firm_oneliner"]
+    assert research["sources"] == ["https://nealcommunities.com"]
+    assert research["aum_tag"] == "AUM_CONFIRMED"   # overwritten, not left stale
+    assert research["disclosed_figure"] == "$700M"
+
+
+def test_qualify_reuses_the_already_parsed_aum_not_a_reparse_of_icp_reason(monkeypatch, wire):
+    """The handler already parses the operator's AUM argument to validate
+    the command (parse_aum) -- it must reuse that value, never re-derive
+    the figure by re-parsing the icp_reason string it writes."""
+    monkeypatch.setattr(bot.dbc, "parked_firm_by_name",
+                        lambda name: {"id": 1, "firm_name": name, "research": {}})
+    captured = {}
+
+    real_parse_aum = bot.parse_aum
+
+    def spying_parse_aum(raw):
+        result = real_parse_aum(raw)
+        captured.setdefault("calls", []).append((raw, result))
+        return result
+
+    monkeypatch.setattr(bot, "parse_aum", spying_parse_aum)
+    updated = []
+    monkeypatch.setattr(bot.dbc, "update_wd_firm", lambda firm_id, **k: updated.append((firm_id, k)))
+
+    bot._handle_qualify('"Acme" 1.2B')
+
+    # parse_aum called exactly once, on the operator's own raw argument --
+    # never a second time against the icp_reason text this handler writes.
+    assert captured["calls"] == [("1.2B", 1_200_000_000.0)]
+    research = updated[0][1]["research"]
+    assert research["aum_value_usd"] == 1_200_000_000.0
+    assert research["disclosed_figure"] == "$1.2B"
+
+
 def test_qualify_no_parked_firm_found(monkeypatch, wire):
     monkeypatch.setattr(bot.dbc, "parked_firm_by_name", lambda name: None)
     bot._handle_qualify('"Nonexistent" 800M')

@@ -325,10 +325,33 @@ def _handle_qualify(arg: str) -> None:
             f'${gate_config.AUM_MAX_USD / 1e9:.1f}B band. Still DISQUALIFIED. Nothing changed.'
         )
         return
+    # The AUM figure must reach research in the same shape icp_gate.py itself
+    # produces (aum_display/aum_value_usd/disclosed_figure/disclosed_label),
+    # not just as free text in icp_reason -- deck_filler.build_fill_data()
+    # reads disclosed_figure/disclosed_label to fill the deck's AUM stat
+    # tile, and reads them from research, never from icp_reason. Reuses the
+    # ALREADY-PARSED `aum` float from above, not a re-parse of icp_reason's
+    # text. Preserves every other research field the original park already
+    # gathered (domain, sources, geography, founded_year, ...) -- only the
+    # AUM-related keys change, including the JSON's own nested "aum_tag"
+    # (a real, live inconsistency confirmed on Neal Communities' actual row:
+    # the wd_firms.aum_tag COLUMN said AUM_CONFIRMED while research["aum_tag"]
+    # was still the original AUM_UNVERIFIED, never brought into agreement).
+    disclosed_figure = human_usd(aum)
+    disclosed_label = "assets under management"
+    research = dict(row.get("research") or {})
+    research.update({
+        "aum_tag": "AUM_CONFIRMED",
+        "aum_value_usd": aum,
+        "disclosed_figure": disclosed_figure,
+        "disclosed_label": disclosed_label,
+        "aum_display": f"{disclosed_figure} ({disclosed_label})",
+    })
     dbc.update_wd_firm(
         row["id"], icp_status="qualified",
         icp_reason=f"QUALIFIED (operator-verified AUM {human_usd(aum)})",
         aum_tag="AUM_CONFIRMED", park_reason=None, park_source=None,
+        research=research,
     )
     tg.send(
         f'Qualified "{row["firm_name"]}" at {human_usd(aum)}. '
