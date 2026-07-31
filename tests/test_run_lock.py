@@ -24,6 +24,10 @@ from src import cli, signal_pipeline, wd_dbc
 from src.run_scan import run_resume, run_single_firm
 
 
+def _noop_progress(_msg: str) -> None:
+    pass
+
+
 def _never_acquires(monkeypatch, target):
     monkeypatch.setattr(target.dbc, "acquire_run_lock", lambda: False)
 
@@ -90,7 +94,7 @@ def test_run_single_firm_raises_when_lock_unavailable(monkeypatch):
     monkeypatch.setattr(signal_pipeline.dbc, "create_wd_run", lambda *a, **k: create_called.append(1))
 
     with pytest.raises(wd_dbc.RunAlreadyInProgress):
-        run_single_firm(mode="manual", firm_name="Acme Capital")
+        run_single_firm(mode="manual", firm_name="Acme Capital", progress=_noop_progress)
 
     assert create_called == []
 
@@ -105,7 +109,14 @@ def test_run_single_firm_releases_the_lock(monkeypatch):
         lambda run_id, group, progress: {"icp_status": "parked", "id": 1},
     )
 
-    run_single_firm(mode="manual", firm_name="Acme Capital")
+    # Every run_single_firm/run_resume call in this file passes an explicit
+    # no-op progress -- the module-level default is progress=tg.progress,
+    # a REAL Telegram sender. This one specifically used to leak: it's the
+    # only call in this file whose code path actually reaches a progress()
+    # call ("Gating Acme Capital...") before returning, so leaving the
+    # real default here posted a live message to the operator's bot on
+    # every pytest run. See conftest.py's autouse guard for the backstop.
+    run_single_firm(mode="manual", firm_name="Acme Capital", progress=_noop_progress)
 
     assert released == [True]
 
@@ -120,7 +131,7 @@ def test_run_resume_raises_when_lock_unavailable(monkeypatch):
                         lambda: checked.append(1))
 
     with pytest.raises(wd_dbc.RunAlreadyInProgress):
-        run_resume()
+        run_resume(progress=_noop_progress)
 
     assert checked == []  # never even looked for a resumable run
 
@@ -129,7 +140,7 @@ def test_run_resume_releases_the_lock_when_nothing_is_resumable(monkeypatch):
     released = _always_acquires_and_tracks_release(monkeypatch, signal_pipeline)
     monkeypatch.setattr(signal_pipeline.dbc, "latest_resumable_run", lambda: None)
 
-    result = run_resume()
+    result = run_resume(progress=_noop_progress)
 
     assert result is None
     assert released == [True]

@@ -254,10 +254,141 @@ def test_deck_attachment_claim_matches_when_both_true():
     assert "deck_attachment_claim_mismatch" not in v
 
 
+# ---------------------------------------------------------------------------
+# firm_oneliner_not_grounded (run 27 fix): same mechanism as
+# posting_title_not_grounded, applied to the firm one-liner Block 2 draws
+# on. Note what this catches and what it doesn't -- see BUILD_LOG.md: a
+# name-collision at the RESEARCH stage (icp_gate.py resolving a firm's
+# research to a different real company) produces a oneliner that is
+# genuinely, correctly grounded in a research blob, just the wrong one.
+# This check only catches the corpus/research object drifting apart from
+# each other, not the research itself being about the wrong firm.
+# ---------------------------------------------------------------------------
+def test_required_facts_pass_when_oneliner_is_empty():
+    """Thin research is an honest, allowed state -- _fallback_blocks already
+    lets Block 2 go blank rather than ship filler; the required-fact check
+    must not punish that."""
+    b1 = sd.block_1("Jane", "Acme Capital", "Fund Controller", 1)
+    b6 = sd.block_6("https://boards.example/jobs/123", deck_attached=False)
+    corpus = sd.grounding_corpus({}, "Acme Capital", "Fund Controller",
+                                 "https://boards.example/jobs/123", ["Fund Controller"], 1)
+    v = sd.find_required_fact_violations(
+        b1, b6, sd._BLOCK_3, "Fund Controller", "Acme Capital",
+        "https://boards.example/jobs/123", corpus, deck_attached=False, firm_oneliner="")
+    assert v == []
+
+
+def test_required_facts_pass_when_oneliner_is_grounded_in_the_research_corpus():
+    b1 = sd.block_1("Jane", "Acme Capital", "Fund Controller", 1)
+    b6 = sd.block_6("https://boards.example/jobs/123", deck_attached=False)
+    research = {"firm_oneliner": "A multifamily investment manager active in the Southeast."}
+    corpus = sd.grounding_corpus(research, "Acme Capital", "Fund Controller",
+                                 "https://boards.example/jobs/123", ["Fund Controller"], 1)
+    v = sd.find_required_fact_violations(
+        b1, b6, sd._BLOCK_3, "Fund Controller", "Acme Capital",
+        "https://boards.example/jobs/123", corpus, deck_attached=False,
+        firm_oneliner=research["firm_oneliner"])
+    assert "firm_oneliner_not_grounded" not in v
+
+
+def test_firm_oneliner_not_grounded_fails_when_missing_from_corpus():
+    """A caller passing a firm_oneliner that never made it into the corpus
+    the LLM/fallback actually drew from -- e.g. research and corpus_text
+    built from two different objects that drifted apart."""
+    b1 = sd.block_1("Jane", "Acme Capital", "Fund Controller", 1)
+    b6 = sd.block_6("https://boards.example/jobs/123", deck_attached=False)
+    corpus = sd.grounding_corpus({}, "Acme Capital", "Fund Controller",
+                                 "https://boards.example/jobs/123", ["Fund Controller"], 1)
+    v = sd.find_required_fact_violations(
+        b1, b6, sd._BLOCK_3, "Fund Controller", "Acme Capital",
+        "https://boards.example/jobs/123", corpus, deck_attached=False,
+        firm_oneliner="A description that never reached the research object.")
+    assert "firm_oneliner_not_grounded" in v
+
+
+def test_draft_email_extracts_and_checks_firm_oneliner_from_research(monkeypatch):
+    """draft_email() itself must pull firm_oneliner out of `research` and
+    pass it through -- not just find_required_fact_violations in isolation."""
+    monkeypatch.setattr(sd, "_generate_blocks",
+                        lambda *a, **k: ("Block 2 text.", "Block 4 text.", False, False))
+    content = sd.draft_email(
+        firm_name="Acme Capital", poc_first_name="Jane", poc_email="jane@acme.example",
+        posting_title="Fund Controller", posting_url="https://x.example/1",
+        titles=["Fund Controller"], posting_count=1, firm_short_name="Acme Capital",
+        research={"firm_oneliner": "A multifamily investment manager active in the Southeast."},
+    )
+    assert content["body"]  # drafted successfully, no required-fact ValueError raised
+
+
 def test_corpus_contains_posting_url():
     corpus = sd.grounding_corpus({"firm_oneliner": "x"}, "Acme Capital", "Fund Controller",
                                  "https://boards.example/jobs/123", ["Fund Controller"], 1)
     assert "https://boards.example/jobs/123" in corpus
+
+
+# ---------------------------------------------------------------------------
+# _canonical_posting_url (run 27 fix): live evidence -- Choice NY's draft
+# P.S. carried LinkedIn guest-search tracking params
+# ("?position=19&pageNum=0&refId=...&trackingId=..."), Neal Communities'
+# (sourced via JSearch) was clean. Scoped to linkedin.com only: real
+# ZipRecruiter rows in wd_postings use "?jid=<id>" as the actual job
+# identifier, not a tracking param -- a blanket strip would break those.
+# ---------------------------------------------------------------------------
+def test_canonical_posting_url_strips_linkedin_tracking_params():
+    dirty = ("https://www.linkedin.com/jobs/view/sr-property-accountant-at-choice-ny-"
+            "property-management-llc-4447076066?position=19&pageNum=0"
+            "&refId=vkwlqF%2FRXr7iSKM43%2BJnYA%3D%3D&trackingId=vFfRqvzoaYTCR%2FlWdpRuig%3D%3D")
+    clean = ("https://www.linkedin.com/jobs/view/sr-property-accountant-at-choice-ny-"
+            "property-management-llc-4447076066")
+    assert sd._canonical_posting_url(dirty) == clean
+
+
+def test_canonical_posting_url_leaves_an_already_clean_linkedin_url_unchanged():
+    clean = ("https://www.linkedin.com/jobs/view/treasury-financial-analyst-at-neal-"
+            "communities-of-southwest-florida-inc-4445031275")
+    assert sd._canonical_posting_url(clean) == clean
+
+
+def test_canonical_posting_url_strips_bare_linkedin_com_host_too():
+    dirty = "https://linkedin.com/jobs/view/some-job-123?position=1&pageNum=0"
+    assert sd._canonical_posting_url(dirty) == "https://linkedin.com/jobs/view/some-job-123"
+
+
+def test_canonical_posting_url_leaves_ziprecruiter_jid_param_alone():
+    """ZipRecruiter's own "?jid=" IS the job identifier, not a tracking
+    param -- the path alone does not resolve without it. A real row
+    observed in wd_postings, confirmed before writing this fix."""
+    url = "https://www.ziprecruiter.com/c/URS-CAPITAL-PARTNERS-I/Job/Controller/-in-Huntington,NY?jid=0f16c83e739780b9"
+    assert sd._canonical_posting_url(url) == url
+
+
+def test_canonical_posting_url_leaves_other_domains_alone():
+    url = "https://boards.example/jobs/123?utm_source=newsletter"
+    assert sd._canonical_posting_url(url) == url
+
+
+def test_canonical_posting_url_handles_empty_string():
+    assert sd._canonical_posting_url("") == ""
+
+
+def test_draft_for_run_strips_linkedin_tracking_params_before_drafting(monkeypatch):
+    """End-to-end: a dirty LinkedIn posting URL must reach neither Block 6
+    nor the grounding corpus with its tracking params intact."""
+    dirty = ("https://www.linkedin.com/jobs/view/sr-property-accountant-at-choice-ny-"
+            "4447076066?position=19&pageNum=0&refId=abc%3D%3D&trackingId=def%3D%3D")
+    clean = "https://www.linkedin.com/jobs/view/sr-property-accountant-at-choice-ny-4447076066"
+    firms = [_firm(1, "Firm A")]
+    postings = {1: [_posting(url=dirty, poc="Jane Doe")]}
+    emails = {"Firm A": ("jane@x.example", "verified")}
+    _patch_common(monkeypatch, firms, postings, emails)
+
+    result = sd.draft_for_run(run_id=1)
+
+    assert len(result.drafted) == 1
+    body = result.drafted[0]["body"]
+    assert clean in body
+    assert "position=" not in body
+    assert "trackingId" not in body
 
 
 # ---------------------------------------------------------------------------
@@ -516,10 +647,67 @@ def _patch_common(monkeypatch, firms, postings_by_id, emails_by_name, senior_poc
 
     monkeypatch.setattr(sd.wd_poc, "find_senior_poc", fake_find_senior_poc)
 
+    # _generate_deck calls lib_referral.deck_filler, which in real mode makes
+    # an LLM call and shells out to soffice for PDF conversion -- neither
+    # belongs in this file's tests (see module docstring: no live LLM). Every
+    # test here that doesn't specifically want deck-generation behavior gets
+    # the pre-existing "no deck" outcome; test_generate_deck_* below and the
+    # dedicated draft_for_run deck tests cover the real behavior.
+    monkeypatch.setattr(sd, "_generate_deck", lambda firm_name, research, progress: None)
+
     monkeypatch.setattr(sd.gmail_client, "create_draft",
                         lambda to, subject, body, attach_path=None, progress=None:
                         {"draft_id": f"DRAFT-{to}", "attached": False})
     return created, recorded
+
+
+# ---------------------------------------------------------------------------
+# _generate_deck: calls lib_referral.deck_filler (vendored, called not
+# copied), never blocks a draft when deck generation itself fails.
+# ---------------------------------------------------------------------------
+def test_generate_deck_returns_pdf_path_on_success(monkeypatch):
+    monkeypatch.setattr(sd.deck_filler, "get_deck_content",
+                        lambda firm_name, research, personalization:
+                        {"profile_bullets": [], "fit_paragraphs": {}})
+    monkeypatch.setattr(sd.deck_filler, "build_and_convert",
+                        lambda firm_name, research, deck_content, progress=None, personalization=None:
+                        {"pptx_path": "generated_decks_c/Acme_Pitch.pptx",
+                         "pdf_path": "generated_decks_c/Acme_Pitch.pdf",
+                         "fill_data": {}})
+
+    result = sd._generate_deck("Acme Capital", {"firm_oneliner": "A manager."}, progress=lambda m: None)
+
+    assert result == "generated_decks_c/Acme_Pitch.pdf"
+
+
+def test_generate_deck_returns_none_when_no_pdf_produced(monkeypatch):
+    """convert_to_pdf() inside build_and_convert() already degrades to
+    pdf_path=None on a missing soffice wrapper or a failed conversion --
+    _generate_deck must pass that through as None, not crash on it."""
+    monkeypatch.setattr(sd.deck_filler, "get_deck_content",
+                        lambda firm_name, research, personalization: {})
+    monkeypatch.setattr(sd.deck_filler, "build_and_convert",
+                        lambda firm_name, research, deck_content, progress=None, personalization=None:
+                        {"pptx_path": "generated_decks_c/Acme_Pitch.pptx", "pdf_path": None, "fill_data": {}})
+
+    result = sd._generate_deck("Acme Capital", {}, progress=lambda m: None)
+
+    assert result is None
+
+
+def test_generate_deck_returns_none_and_logs_on_exception(monkeypatch):
+    """A deck problem (LLM hiccup, a DeckFillError from a preflight/overflow
+    check) must never cost a firm its draft."""
+    def _boom(firm_name, research, personalization):
+        raise RuntimeError("LLM extraction failed")
+
+    monkeypatch.setattr(sd.deck_filler, "get_deck_content", _boom)
+    progressed = []
+
+    result = sd._generate_deck("Acme Capital", {}, progress=progressed.append)
+
+    assert result is None
+    assert any("deck generation failed" in msg for msg in progressed)
 
 
 def test_draft_for_run_respects_draft_cap(monkeypatch):
@@ -662,6 +850,31 @@ def test_draft_for_run_cross_workflow_prior_contact_is_advisory_not_blocking(mon
     row = result.drafted_with_prior_contact[0]
     assert "Workflow C" in row["collision_note"]
     assert row["prior_contact_workflow"] == "C"
+
+
+def test_draft_for_run_attaches_the_deck_when_generation_succeeds(monkeypatch):
+    """End-to-end: a successful _generate_deck() result must reach the Gmail
+    attachment, the wd_drafts row, AND Block 6's wording -- the single
+    deck_pdf_path variable that drives all three (see _draft_one_firm)."""
+    firms = [_firm(1, "Firm A")]
+    postings = {1: [_posting(poc="Jane Doe")]}
+    emails = {"Firm A": ("jane@x.example", "verified")}
+    created, recorded = _patch_common(monkeypatch, firms, postings, emails)
+    monkeypatch.setattr(sd, "_generate_deck",
+                        lambda firm_name, research, progress: "generated_decks_c/Firm_A_Pitch.pdf")
+    gmail_calls = []
+    monkeypatch.setattr(sd.gmail_client, "create_draft",
+                        lambda to, subject, body, attach_path=None, progress=None:
+                        gmail_calls.append(attach_path) or {"draft_id": f"DRAFT-{to}", "attached": True})
+
+    result = sd.draft_for_run(run_id=1)
+
+    assert len(result.drafted) == 1
+    row = result.drafted[0]
+    assert row["deck_pdf_path"] == "generated_decks_c/Firm_A_Pitch.pdf"
+    assert row["deck_attached"] is True
+    assert gmail_calls == ["generated_decks_c/Firm_A_Pitch.pdf"]
+    assert "The deck is attached." in row["body"]
 
 
 def test_draft_for_run_resets_and_reports_fallback_counts(monkeypatch):

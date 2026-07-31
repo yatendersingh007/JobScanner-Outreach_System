@@ -25,6 +25,10 @@ def _qualified_firm(name="Acme Capital", i=1):
            "verdict_source": "gated", "icp_status": "qualified"}
 
 
+def _noop_progress(_msg: str) -> None:
+    pass
+
+
 @pytest.fixture(autouse=True)
 def wire(monkeypatch):
     sent = []
@@ -47,7 +51,7 @@ def test_run_scan_sends_intent_message_before_drafting(monkeypatch, wire):
 
     monkeypatch.setattr(run_scan.signal_drafting, "draft_for_run", fake_draft_for_run)
 
-    run_scan.run_scan(mode="manual")
+    run_scan.run_scan(mode="manual", progress=_noop_progress)
 
     combined = "\n".join(wire)
     assert "5 qualified" in combined
@@ -63,7 +67,7 @@ def test_run_scan_intent_message_omitted_when_nothing_qualified(monkeypatch, wir
     monkeypatch.setattr(run_scan.signal_drafting, "draft_for_run",
                         lambda run_id, progress: called.append(1) or DraftBatchResult())
 
-    run_scan.run_scan(mode="manual")
+    run_scan.run_scan(mode="manual", progress=_noop_progress)
 
     assert wire == []
     assert called == []
@@ -77,7 +81,7 @@ def test_run_scan_dry_never_drafts(monkeypatch, wire):
     monkeypatch.setattr(run_scan.signal_drafting, "draft_for_run",
                         lambda run_id, progress: called.append(1))
 
-    result = run_scan.run_scan(mode="manual", dry=True)
+    result = run_scan.run_scan(mode="manual", dry=True, progress=_noop_progress)
 
     assert called == []
     assert wire == []
@@ -91,7 +95,7 @@ def test_run_scan_merges_draft_batch_result_onto_run_result(monkeypatch, wire):
     batch = DraftBatchResult(drafted=[{"poc_name": "Jane"}], fallback_counts={"style:x": 1})
     monkeypatch.setattr(run_scan.signal_drafting, "draft_for_run", lambda run_id, progress: batch)
 
-    result = run_scan.run_scan(mode="manual")
+    result = run_scan.run_scan(mode="manual", progress=_noop_progress)
 
     assert result.drafted == [{"poc_name": "Jane"}]
     assert result.fallback_counts == {"style:x": 1}
@@ -106,7 +110,7 @@ def test_run_scan_cancelled_during_gating_never_drafts(monkeypatch, wire):
     monkeypatch.setattr(run_scan.signal_drafting, "draft_for_run",
                         lambda run_id, progress: called.append(1))
 
-    run_scan.run_scan(mode="manual")
+    run_scan.run_scan(mode="manual", progress=_noop_progress)
 
     assert called == []
 

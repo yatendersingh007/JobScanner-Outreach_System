@@ -1436,3 +1436,171 @@ Tests: 267 passed (unchanged — these four fixes are runtime/config
 behavior with no new test coverage added in this entry; `pytest` was rerun
 to confirm none of the four changes broke anything already covered). 0
 failures.
+
+## Run 27 fixes: deck attachment, executive-tier prefix audit, oneliner grounding, geo gate finding, URL normalization, Telegram test leak - 2026-08-03
+
+Five fixes from a live run (run 27) that produced 3 Gmail drafts, one of
+them wrong, plus one report-only investigation.
+
+**1. No pitch deck PDF was ever attached.** `src/signal_drafting.py`
+hardcoded `deck_pdf_path = None` with a comment "Prompt 4's scope: no deck
+is generated yet" — Block 6's wording, the Gmail attachment, and the
+`wd_drafts` row were all correctly wired to key off that one variable, but
+nothing ever set it to anything else. Workflow C's own deck generator was
+already vendored into this repo, unchanged, at `lib_referral/deck_filler.py`
+(commit `078493aa00e27dcd17716c0f57bb6d0ae35644da`, copied 2026-07-28 —
+same commit as `lib_snapshot/drafting/pitch_deck.py`, which it reuses
+`_BIG_MONEY_RE`/`_short_name` from) — its `build_and_convert()` fills the
+master PPTX (`templates/Pitch_Master.pptx`, confirmed present) via the slot
+map (`templates/pitch_slots.json`, confirmed present) and converts to PDF
+via `scripts/office/soffice.py` (confirmed present). Called, not copied:
+added `_generate_deck(firm_name, research, progress)` in
+`signal_drafting.py`, which calls `deck_filler.get_deck_content()` then
+`deck_filler.build_and_convert()` and returns the PDF path (or `None`).
+`build_and_convert()`'s own `convert_to_pdf()` already degrades to
+`pdf_path=None` on a missing soffice wrapper or a failed conversion
+(Workflow C's own design) — what it does NOT guard is the content-
+extraction half, so `_generate_deck` wraps the whole call in a bare
+`try/except`, matching the "an honest blank beats a fabricated or blocked
+one" posture the rest of this pipeline already follows: a deck problem
+must never cost a firm its draft.
+
+**2. "Principal" (and, on audit, "Owner"/"Partner") matched as a
+seniority PREFIX, not the role.** Live: Apollo returned "Rao Iqbal,
+Principal Backend Engineer" at AlphaX and it drafted as an executive
+contact — the 2026-08-02 fix only ever excluded "Principal Accountant".
+"Principal" is a routine seniority prefix in engineering/consulting/
+science (Principal Engineer/Developer/Architect/Scientist/Consultant/
+Analyst/Designer/Researcher, Principal Product/Program Manager, Principal
+Data/Software/Backend/Frontend/Security/Technical/Solutions/Sales
+[Engineer|...]) — none of these are the economic-buyer role the tier
+means. `src/wd_poc.py`'s `_KEYWORD_EXCLUSIONS["principal"]` reworked to
+match only when Principal names the role itself (standalone, "Managing
+Principal", "Founding Principal", "Principal & CEO", "Principal, Real
+Estate" all still match — nothing occupational follows). Applying the
+same audit to the rest of the executive tier found the identical shape
+twice more: "owner" wrongly caught "Product/Technical/Data/System/
+Process/Risk/Content/Platform Owner" (all real accountability roles, not
+company ownership), "partner" wrongly caught "Technical Partner" and
+"Channel Partner"/"Channel Partner Manager" beyond the already-fixed
+"Business Partner" case. founder/co-founder/managing partner/managing
+director/president/ceo/coo were re-checked against the same class of
+collision and found clean. Every case verified empirically (a standalone
+script run before writing the final regex, matching this file's established
+practice), not just reasoned about.
+
+**3. The firm one-liner in AlphaX's draft described a different real
+company — traced, not guessed.** AlphaX's draft opened with "Builder-
+developer and vertically integrated real estate investment and asset
+manager", language describing a US homebuilder, not a UAE real estate firm
+(domain `alphax.ae`). Queried the actual `wd_firms` row for the live run:
+`research["domain"]` was `alphax-capital.com` (not `alphax.ae`),
+`research["geography"]` was `"Silicon Valley / US markets"`, and
+`research["sources"]` were `alphax-capital.com` and an
+`adviserinfo.sec.gov` search — i.e. `icp_gate.py`'s research step resolved
+"AlphaX" to a **completely different, real US company** ("AlphaX
+Capital"), not the actual UAE-domained job poster. `research_and_gate()`
+(`lib_referral/icp_gate.py`, vendored) takes only a `firm_name` string —
+no domain hint parameter exists for a caller (like Workflow D, which
+already knows the posting's employer domain from the scanner) to pass in
+and disambiguate against. Its own name-collision guard
+(`_entity_prefix`/`_UNVERIFIED_SOURCE_TAG`, FIX 27 sub-change D) is a
+best-effort regex over source text, not a domain check, and evidently
+didn't fire for this pair. **This means the oneliner was not "ungrounded"
+in the traditional sense — it was accurately, consistently grounded in the
+firm's OWN stored research blob, just the wrong firm's**, because every
+downstream field (region_ok, firm_oneliner, AUM, everything) reflected the
+substituted company. Added the requested check anyway
+(`find_required_fact_violations`'s new `firm_oneliner_not_grounded`,
+mirroring the existing `posting_title_not_grounded` mechanism exactly —
+`research["firm_oneliner"]` must actually reach the corpus text the
+LLM/fallback draws from) since it is a real, legitimate regression guard
+against research and corpus construction drifting apart from each other.
+Flagging plainly: it would **not** have caught run 27's actual defect,
+since research and corpus never drifted apart here — the research object
+itself was self-consistently about the wrong company. The real fix would
+be a domain cross-check inside `research_and_gate()`'s own resolution
+step; out of scope for this entry (the ask was the grounding check plus a
+report), and `icp_gate.py` is vendored — a fix there needs the donor-repo
+filing CLAUDE.md requires, not a Workflow-D-local patch.
+
+**4. Geo gate — investigation only, no code changed.** Asked whether the
+ICP gate can reject a firm outside North America (AlphaX qualified despite
+scanning being scoped to US + Canada). It CAN: `apply_gate()`
+(`lib_referral/icp_gate.py`) disqualifies outright when `region_ok` is
+false (`"Outside North America, disqualified"`), and `region_ok` is a
+real field the extraction prompt asks the LLM for directly ("true if
+headquartered or primarily operating in the US, Canada, or Mexico"). It is
+**pure LLM judgment with no deterministic backstop** — there is no
+domain-TLD check, no cross-reference against a firm's own address. Notably,
+`lib_snapshot/config.py` defines a `NORTH_AMERICA` set
+(`{"USA", "United States", "Canada", "Mexico", ...}`) that is **never
+referenced anywhere else in the codebase** — dead code, not a wired-in
+check. For AlphaX specifically, `region_ok=true` was an accurate judgment
+about the WRONG company (see item 3 above — "AlphaX Capital" genuinely is
+Silicon Valley/US-based), not a false judgment about the real one. The
+scanner's own "US + Canada" region setting (`scanner/config.yaml`)
+constrains the JOB BOARD SEARCH scope, not the hiring firm's own
+headquarters — a US-facing/remote posting from a foreign-headquartered firm
+is a real, structural gap the scanner's region config was never designed
+to close. Per the task's own instruction, gate behavior was left
+unchanged.
+
+**5. Posting URLs carried LinkedIn tracking query params into the
+draft.** Choice NY's draft P.S. had `?position=19&pageNum=0&refId=...
+&trackingId=...`; Neal Communities' (sourced via JSearch, not TinyFish's
+LinkedIn guest search) had none. Confirmed against real `wd_postings`
+rows before writing the fix, which also surfaced a real counter-example:
+ZipRecruiter rows use `?jid=<id>` as the ACTUAL job identifier (the path
+alone, `/c/<Company>/Job/<Title>/-in-<City>,<ST>`, does not resolve without
+it) — a blanket "strip everything after `?`" would have broken those
+links. `_canonical_posting_url()` (new, `src/signal_drafting.py`) strips
+query params only when the host is `linkedin.com`/`*.linkedin.com`,
+confirmed via the real JSearch-sourced Neal Communities URL that the
+canonical `/jobs/view/<slug>-<id>` path resolves with no query string at
+all. Applied where `_draft_one_firm` selects `posting_url` — the same
+value flows into both Block 6 and `grounding_corpus`, so the URL-grounding
+check trivially still passes (both sides use the identical stripped
+string).
+
+**6. Tests sent live Telegram messages.** `tests/test_run_lock.py` called
+`run_single_firm(mode="manual", firm_name="Acme Capital")` without
+overriding the module-level default `progress=tg.progress` — a REAL
+Telegram sender, and this repo's own `.env` carries live
+`TELEGRAM_BOT_TOKEN_D`/`TELEGRAM_CHAT_ID` values (needed for real runs).
+Confirmed one call (`test_run_single_firm_releases_the_lock`) genuinely
+reached `progress("Gating Acme Capital...")` before this fix — meaning
+every full-suite `pytest` run this session likely posted that message to
+the operator's live bot. Fixed by passing an explicit no-op `progress` at
+every `run_single_firm`/`run_resume` call site in that file (only one of
+the four actually reached a `progress()` call before this fix; all four
+fixed for consistency). Audited the rest of `tests/` for the same shape:
+`tests/test_run_scan_drafting.py`'s five `run_scan.run_scan(mode="manual")`
+calls also relied on the same real default, but never actually leaked
+today — `signal_pipeline.run` and `signal_drafting.draft_for_run` are both
+fully mocked in every test there, and neither fake implementation calls
+`progress()` — fixed anyway for consistency, since relying on every future
+mock forever ignoring a live argument is fragile. Added
+`tests/conftest.py`'s autouse `_block_real_telegram_sends` fixture as the
+general backstop: substitutes a guard object for `wd_telegram`'s own
+`requests` name (mirroring `src/jsearch_pool.py`'s `_PooledRequests`
+technique — scoped to that one module's namespace, not the shared
+`requests` module, so it never affects `wd_poc.py`/`apollo_enrich.py`'s own
+`requests.post` mocks in their own tests) whose `.post()` calls
+`pytest.fail()` — which subclasses `BaseException`, not `Exception`,
+specifically so it survives `wd_telegram.py`'s own bare `except Exception`
+around every `requests.post` call (a plain raise would otherwise be
+silently swallowed and logged as a warning, not fail the test). Known gap,
+documented in the fixture's own docstring: `_edit()`'s HTTP call runs on a
+background daemon thread, so an exception there doesn't propagate to the
+test — the guard's real coverage is the two synchronous entry points
+(`send()`, and `progress()`'s first call), which is the shape both the
+found leak and any realistic future one would take.
+
+Tests: 434 passed (up from 364 — new coverage for `_generate_deck`, the
+deck-attachment end-to-end path, every executive-keyword prefix collision,
+`firm_oneliner_not_grounded`, `_canonical_posting_url` including the
+ZipRecruiter negative case, and the Telegram guard itself). 0 failures. No
+vendored `.py` file touched (`git status --porcelain -- scanner/
+lib_referral/ lib_snapshot/` shows no `.py` files dirty). No scan command
+run — verified via `pytest` and direct function calls/DB queries only.

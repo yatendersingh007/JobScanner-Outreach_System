@@ -403,6 +403,108 @@ def test_rank_managing_director_of_finance_falls_through_to_svp_vp_tier():
 
 
 # ---------------------------------------------------------------------------
+# Run 27 fix: "principal" as a SENIORITY PREFIX (engineering/consulting/
+# science), not the role itself, must never match the executive tier. Live
+# evidence: Apollo returned "Rao Iqbal, Principal Backend Engineer" at
+# AlphaX and it wrongly drafted as an executive contact. Same prefix-vs-role
+# audit applied to every other executive keyword -- "owner" and "partner"
+# both needed the identical fix.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("title", [
+    "Principal", "Managing Principal", "Founding Principal",
+    "Principal & CEO", "Principal, Real Estate",
+])
+def test_title_matches_keyword_principal_matches_when_principal_is_the_role(title):
+    assert wd_poc._title_matches_keyword(title.lower(), "principal") is True
+
+
+@pytest.mark.parametrize("colliding_title", [
+    "Principal Backend Engineer",   # the exact run-27 live false positive
+    "Principal Engineer",
+    "Principal Developer",
+    "Principal Architect",
+    "Principal Scientist",
+    "Principal Consultant",
+    "Principal Analyst",
+    "Principal Accountant",
+    "Principal Designer",
+    "Principal Researcher",
+    "Principal Product Manager",
+    "Principal Program Manager",
+    "Principal Data Scientist",
+    "Principal Data Engineer",
+    "Principal Software Engineer",
+    "Principal Frontend Engineer",
+    "Principal Security Engineer",
+    "Principal Technical Program Manager",
+    "Principal Solutions Architect",
+    "Principal Sales Engineer",
+])
+def test_title_matches_keyword_principal_excludes_occupational_prefixes(colliding_title):
+    assert wd_poc._title_matches_keyword(colliding_title.lower(), "principal") is False
+
+
+def test_rank_alphax_run27_false_positive_no_longer_ranks_as_executive():
+    """The exact live case: a solo "Principal Backend Engineer" candidate
+    must not rank at all (no tier recognizes an engineering title), and
+    must not outrank a genuine executive."""
+    solo = [_person("a", "Principal Backend Engineer", FIRM)]
+    assert wd_poc._rank(solo, FIRM) is None
+    people = [_person("a", "Principal Backend Engineer", FIRM),
+             _person("b", "Chief Operating Officer", FIRM)]
+    assert wd_poc._rank(people, FIRM)["title"] == "Chief Operating Officer"
+
+
+@pytest.mark.parametrize("title", [
+    "Owner", "Managing Owner", "Founder & Owner", "Owner-Operator", "Co-Owner",
+])
+def test_title_matches_keyword_owner_matches_when_owner_is_the_role(title):
+    assert wd_poc._title_matches_keyword(title.lower(), "owner") is True
+
+
+@pytest.mark.parametrize("colliding_title", [
+    "Product Owner",   # named minimum for the "owner" audit
+    "Technical Owner",
+    "Data Owner",
+    "System Owner",
+    "Process Owner",
+    "Risk Owner",
+    "Content Owner",
+    "Platform Owner",
+])
+def test_title_matches_keyword_owner_excludes_accountability_role_prefixes(colliding_title):
+    assert wd_poc._title_matches_keyword(colliding_title.lower(), "owner") is False
+
+
+def test_rank_product_owner_does_not_rank_as_executive():
+    solo = [_person("a", "Product Owner", FIRM)]
+    assert wd_poc._rank(solo, FIRM) is None
+
+
+@pytest.mark.parametrize("title", [
+    "Partner", "Managing Partner", "Partner & CEO", "Senior Partner",
+    "General Partner", "Equity Partner", "Partner, Real Estate",
+])
+def test_title_matches_keyword_partner_matches_when_partner_is_the_role(title):
+    assert wd_poc._title_matches_keyword(title.lower(), "partner") is True
+
+
+@pytest.mark.parametrize("colliding_title", [
+    "Technical Partner",   # named minimum for the "partner" audit
+    "Channel Partner",
+    "Channel Partner Manager",
+    "HR Business Partner",
+])
+def test_title_matches_keyword_partner_excludes_non_equity_relationship_roles(colliding_title):
+    assert wd_poc._title_matches_keyword(colliding_title.lower(), "partner") is False
+
+
+def test_rank_technical_partner_does_not_rank_as_executive():
+    solo = [_person("a", "Technical Partner", FIRM)]
+    assert wd_poc._rank(solo, FIRM) is None
+
+
+# ---------------------------------------------------------------------------
 # _rank_all / _rank: _rank is a thin wrapper over _rank_all's first result
 # ---------------------------------------------------------------------------
 def test_rank_all_returns_every_matching_candidate_in_seniority_order():

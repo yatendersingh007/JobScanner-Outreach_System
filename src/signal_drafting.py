@@ -18,8 +18,9 @@ import logging
 import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional
+from urllib.parse import urlsplit, urlunsplit
 
-from lib_referral import apollo_enrich, config as gate_config, fact_check, gmail_client, testmode
+from lib_referral import apollo_enrich, config as gate_config, deck_filler, fact_check, gmail_client, testmode
 from . import wd_config as config
 from . import wd_dbc as dbc
 from . import wd_poc
@@ -147,6 +148,30 @@ def distinct_titles(postings: list[dict]) -> list[str]:
     return out
 
 
+def _canonical_posting_url(url: str) -> str:
+    """Strips LinkedIn's guest-search tracking query params before a
+    posting URL reaches a draft. Live evidence (run 27): Choice NY's draft
+    P.S. carried "?position=19&pageNum=0&refId=...&trackingId=..." from
+    TinyFish's LinkedIn guest search, while Neal Communities' (sourced via
+    JSearch, no query string at all) was clean and still resolves -- the
+    canonical LinkedIn job identity lives entirely in the
+    /jobs/view/<slug>-<id> path.
+
+    Scoped to linkedin.com specifically, NOT a blanket strip-everything-
+    after-"?": wd_postings also carries ZipRecruiter URLs where "?jid=<id>"
+    IS the job identifier (the path alone, e.g.
+    /c/<Company>/Job/<Title>/-in-<City>,<ST>, does not uniquely resolve
+    without it) -- confirmed against real rows before writing this, a
+    blanket strip would have broken those links."""
+    if not url:
+        return url
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if host != "linkedin.com" and not host.endswith(".linkedin.com"):
+        return url
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
+
 # ---------------------------------------------------------------------------
 # Grounding corpus (BUILD item 2): the gate's research dict PLUS the posting
 # facts -- exact title, firm name, posting URL, distinct posting count.
@@ -176,7 +201,8 @@ _DECK_ATTACHED_CLAIM_RE = re.compile(r"the deck is attached", re.IGNORECASE)
 
 def find_required_fact_violations(block1_text: str, block6_text: str, block3_text: str,
                                   posting_title: str, firm_short_name: str, posting_url: str,
-                                  corpus_text: str, deck_attached: bool) -> list[str]:
+                                  corpus_text: str, deck_attached: bool,
+                                  firm_oneliner: str = "") -> list[str]:
     v = []
     if not posting_title or posting_title not in block1_text:
         v.append("missing_posting_title_in_block1")
@@ -186,6 +212,19 @@ def find_required_fact_violations(block1_text: str, block6_text: str, block3_tex
         v.append("missing_firm_name_in_block1")
     if not posting_url or posting_url not in block6_text:
         v.append("missing_posting_url_in_block6")
+    # Run 27 fix: same mechanism as posting_title_not_grounded above, applied
+    # to the firm one-liner Block 2 draws on. Confirmed empty is fine (thin
+    # research -- _fallback_blocks already lets Block 2 go blank rather than
+    # ship filler); confirmed NON-empty must actually be traceable to the
+    # research object the corpus was built from, not silently dropped
+    # between research and corpus construction. Note the limit of what this
+    # catches: it verifies research["firm_oneliner"] reached the corpus the
+    # LLM/fallback draws from, not that the RESEARCH ITSELF is about the
+    # right company -- a name-collision at the research stage (a different
+    # real firm entirely) produces an oneliner that is genuinely, correctly
+    # grounded in a research blob, just the wrong one. See BUILD_LOG.md.
+    if firm_oneliner and firm_oneliner not in corpus_text:
+        v.append("firm_oneliner_not_grounded")
     # The claim and the attachment cannot diverge: Block 6 says a deck is
     # attached exactly when one genuinely is, in either direction.
     if bool(_DECK_ATTACHED_CLAIM_RE.search(block6_text)) != bool(deck_attached):
@@ -758,9 +797,11 @@ def draft_email(firm_name: str, poc_first_name: str, poc_email: str, posting_tit
     b5 = _BLOCK_5
     b6 = block_6(posting_url, deck_attached)
     corpus_text = grounding_corpus(research, firm_name, posting_title, posting_url, titles, posting_count)
+    firm_oneliner = str((research or {}).get("firm_oneliner") or "").strip()
 
     req_violations = find_required_fact_violations(
-        b1, b6, b3, posting_title, firm_short_name, posting_url, corpus_text, deck_attached)
+        b1, b6, b3, posting_title, firm_short_name, posting_url, corpus_text, deck_attached,
+        firm_oneliner=firm_oneliner)
     if req_violations:
         # Should be unreachable given Python assembly above -- this is the
         # defensive backstop for a caller passing drifted facts, per FIX 10's
@@ -803,6 +844,37 @@ class DraftBatchResult:
     fallback_counts: dict = field(default_factory=dict)
 
 
+# ---------------------------------------------------------------------------
+# Deck generation (run 27 fix): Workflow C's own generator, vendored unchanged
+# at lib_referral/deck_filler.py -- called, never copied. Same master PPTX
+# (templates/Pitch_Master.pptx), same slot map, same fixed slide copy;
+# firm-specific fields differ (that's the point of the fill). build_and_convert()
+# runs the LLM content extraction, the XML slot-fill, and the PDF conversion in
+# one call; convert_to_pdf() inside it already degrades to pdf_path=None on a
+# missing soffice wrapper or a conversion failure (Workflow C's own design).
+# What it does NOT already guard is the CONTENT half -- a real LLM hiccup or a
+# DeckFillError (a preflight slot mismatch, a stat-tile overflow) raises. A
+# deck problem must never cost a firm its draft, so that half is guarded here,
+# in Workflow D's own code, the same "an honest blank beats a fabricated or
+# blocked one" posture CLAUDE.md states for everything else in this pipeline.
+# ---------------------------------------------------------------------------
+def _generate_deck(firm_name: str, research: dict, progress: Progress) -> Optional[str]:
+    """Path to the generated deck PDF, or None if generation/conversion
+    failed or produced no PDF. Workflow D has no personalization-hooks
+    phase of its own (see firm_short's docstring) -- personalization is
+    passed empty, matching deck_filler's own default for a caller with
+    nothing to add there."""
+    try:
+        deck_content = deck_filler.get_deck_content(firm_name, research, personalization={})
+        result = deck_filler.build_and_convert(firm_name, research, deck_content,
+                                               progress=progress, personalization={})
+    except Exception as e:  # noqa: BLE001 - a deck failure must never block a draft
+        progress(f"{firm_name}: deck generation failed ({e}); drafting without a deck.")
+        return None
+    pdf_path = result.get("pdf_path")
+    return str(pdf_path) if pdf_path else None
+
+
 def _draft_one_firm(firm: dict, contacted_this_run: set[str], progress: Progress) -> tuple[str, dict]:
     """Returns (bucket_name, row). row is the wd_drafts row for a successful
     draft, or the wd_firms row itself for no_email/duplicate_within_run
@@ -814,7 +886,7 @@ def _draft_one_firm(firm: dict, contacted_this_run: set[str], progress: Progress
     titles = distinct_titles(postings)
     posting_count = len(titles)
     posting_title = titles[0] if titles else ""
-    posting_url = next((p["url"] for p in postings if p.get("url")), "")
+    posting_url = _canonical_posting_url(next((p["url"] for p in postings if p.get("url")), ""))
     short_name = firm_short(firm_name)
 
     # POC discovery, in order: the scanner's poc_name_hint (a name hint only,
@@ -865,10 +937,11 @@ def _draft_one_firm(firm: dict, contacted_this_run: set[str], progress: Progress
                           f"{prior_contact_at}, check sent mail before sending.")
         progress(f"{firm_name}: {poc_name} {collision_note}")
 
-    # Prompt 4's scope: no deck is generated yet. Single source of truth --
-    # this one variable drives Block 6's wording, the Gmail attachment, and
-    # the wd_drafts row, so they cannot drift apart from each other again.
-    deck_pdf_path = None
+    # Single source of truth -- this one variable drives Block 6's wording,
+    # the Gmail attachment, and the wd_drafts row, so they cannot drift
+    # apart from each other. None (generation failed, or produced no PDF)
+    # means exactly what it always meant: draft without a deck.
+    deck_pdf_path = _generate_deck(firm_name, research, progress)
     poc_first_name = poc_name.split()[0] if poc_name else "there"
     email_content = draft_email(
         firm_name=firm_name, poc_first_name=poc_first_name, poc_email=email,

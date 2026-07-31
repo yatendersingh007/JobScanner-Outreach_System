@@ -88,6 +88,29 @@ entirely the moment ITS ONE candidate's verified-email check failed,
 even when a lower-ranked but still-relevant candidate existed and would
 have resolved. _rank is kept as a thin wrapper over _rank_all's first
 result, in case anything else ever needs "just the top one."
+
+Run 27 (live production run) drafted to "Rao Iqbal, Principal Backend
+Engineer" at AlphaX -- the 2026-08-02 "principal" exclusion above only
+ever excluded "Principal Accountant"; it said nothing about "Backend
+Engineer". "Principal" as a SENIORITY PREFIX, not the role itself, is
+routine outside real estate/finance -- Principal Engineer/Developer/
+Architect/Scientist/Consultant/Analyst/Designer/Researcher, Principal
+Product/Program Manager, Principal Data/Software/Backend/Frontend/
+Security/Technical/Solutions/Sales [Engineer|...]. Reworked so "principal"
+only matches when it names the role itself (standalone, "Managing
+Principal", "Founding Principal", "Principal & CEO", "Principal, Real
+Estate"), rejecting whenever an occupational noun/modifier immediately
+follows. A follow-up audit applied the same prefix-vs-role check to every
+other executive keyword: "owner" needed the identical fix ("Product
+Owner" is an agile/scrum role, not a company owner; same shape for
+Technical/Data/System/Process/Risk/Content/Platform Owner), and "partner"
+needed two more exclusions beyond the existing "Business Partner" one --
+"Technical Partner" (the named minimum) and "Channel Partner"/"Channel
+Partner Manager" (same non-equity relationship-role shape, found during
+the audit). founder/co-founder/managing partner/managing director/
+president/ceo/coo were re-checked against the same class of prefix
+collision and found clean -- no realistic non-executive title shares
+their text the way "principal"/"owner"/"partner" do.
 """
 from __future__ import annotations
 
@@ -147,9 +170,20 @@ EXCLUDE = re.compile(r"\b(intern|internship|assistant to|coordinator|clerk)\b", 
 # in "assistant controller", is True; even \bcontroller\b alone still matches
 # it (both words are whole words), so this needs the lookbehind specifically.
 #
-# "principal": must not also catch "Principal Accountant" -- an
-# accounting-track title, not the executive/economic-buyer role this tier
-# means.
+# "principal": live evidence (run 27, AlphaX draft) that a bare \bprincipal\b(?!
+# accountant) exclusion was not nearly enough -- Apollo returned "Rao Iqbal,
+# Principal Backend Engineer" and it matched the executive tier, because
+# nothing about "backend engineer" was excluded. "Principal" as a SENIORITY
+# PREFIX (not the role itself) is routine in engineering, consulting, and
+# science -- Principal Engineer/Developer/Architect/Scientist/Consultant/
+# Analyst/Designer/Researcher, Principal Product/Program Manager, Principal
+# Data/Software/Backend/Frontend/Security/Technical/Solutions/Sales
+# [Engineer|...]. None of these are the economic-buyer role this tier means.
+# Reworked to match only when Principal IS the role: standalone "Principal",
+# "Managing Principal", "Founding Principal", "Principal & CEO", "Principal,
+# Real Estate" all still match (nothing occupational immediately follows);
+# every title above is excluded because an occupational noun/modifier
+# immediately follows "principal".
 #
 # "president": must not also catch "Vice President of Finance" or "Senior
 # Vice President of Accounting" -- both already have their own, lower
@@ -163,18 +197,37 @@ EXCLUDE = re.compile(r"\b(intern|internship|assistant to|coordinator|clerk)\b", 
 # tier. Falls through correctly once excluded here: "director of
 # accounting"/"director of finance" in the lower tiers still match them.
 #
+# "owner": same prefix-vs-role shape as "principal" (run 27 follow-up audit,
+# not itself live-observed but the identical pattern) -- "Product Owner" is
+# a routine agile/scrum role, not a company owner; "Technical/Data/System/
+# Process/Risk/Content/Platform Owner" are the same shape (a named
+# accountability, not equity ownership). Standalone "Owner", "Managing
+# Owner", "Founder & Owner", "Owner-Operator", "Co-Owner" are unaffected --
+# none of them have one of these words IMMEDIATELY before "owner".
+#
 # "partner": must not also catch "Partnership Accountant" (already handled
 # by \bpartner\b alone -- "partner" is not a whole word inside
-# "partnership") or "Finance Business Partner" (a real, commonly-used
-# finance title where "partner" means "business partnering," not equity
-# partnership -- found during the exhaustive pairwise check, not named
-# explicitly, but the same shape of problem).
+# "partnership"), "Finance Business Partner"/"HR Business Partner" (a real,
+# commonly-used title family where "partner" means "business partnering,"
+# not equity partnership), "Technical Partner" (run 27 follow-up audit's
+# named minimum -- the same non-equity partnering sense, just without the
+# word "Business" in between), or "Channel Partner"/"Channel Partner
+# Manager" (same shape, a sales/BD relationship role, found during the
+# follow-up audit).
 _KEYWORD_EXCLUSIONS: dict[str, re.Pattern] = {
     "controller": re.compile(r"(?<!assistant )\bcontroller\b"),
-    "principal": re.compile(r"\bprincipal\b(?!\s+accountant)"),
+    "principal": re.compile(
+        r"\bprincipal\b(?!\s+(?:engineer|developer|architect|scientist|consultant|analyst|"
+        r"accountant|designer|researcher|product|program|manager|data|software|backend|"
+        r"frontend|security|technical|solutions|sales)\b)"
+    ),
     "president": re.compile(r"(?<!vice )\bpresident\b"),
     "managing director": re.compile(r"\bmanaging director\b(?!\s+of\s+(?:accounting|finance))"),
-    "partner": re.compile(r"(?<!business )\bpartner\b"),
+    "owner": re.compile(
+        r"(?<!product )(?<!technical )(?<!data )(?<!system )(?<!process )(?<!risk )"
+        r"(?<!content )(?<!platform )\bowner\b"
+    ),
+    "partner": re.compile(r"(?<!business )(?<!technical )(?<!channel )\bpartner\b"),
 }
 
 
