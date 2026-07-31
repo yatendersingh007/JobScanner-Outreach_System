@@ -2480,3 +2480,34 @@ donor filing rather than a local edit, and it is not attempted here.
 620 tests pass (was 623; the removed Rule B tests outnumber the added ones).
 No vendored `.py` file touched. No scan command run.
 
+
+## TinyFish descriptions: negative result, do not retry - 2026-07-31
+
+Probed whether LinkedIn guest-search results pages carry job descriptions,
+since the classifier matches employer-type signals against company name +
+description only, and tinyfish.py never sets description (0-3% classification
+rate vs JSearch's 33% on 112 postings/run).
+
+GOAL_TEMPLATE and OUTPUT_SCHEMA were patched from outside the vendored module
+(both are read at call time - lines 134 and 194 - so the jsearch_pool.py
+technique applies). One live target: LinkedIn US - Property Accountant.
+
+Result: 32 rows, 27 with a non-empty description. Every one is LinkedIn UI
+chrome, not job text:
+  'Be an early applicant.'
+  'Medical insurance +4 benefits.'
+  'Be an early applicant +4 benefits.'
+Zero employer-type signal. Runtime 496s vs the ~300s a normal target takes -
+65% slower for no gain, against a 900s MAX_WAIT ceiling.
+
+Conclusion: the data is not on the page. Real descriptions would require
+navigating into each of ~32 postings per target, which guarantees timeout.
+The NormalizedJob interception plumbing was NOT built.
+
+The probe did quantify the loss: America West Properties, RREAF Holdings,
+Invest with Roots and Century Group all appeared and are all discarded for
+lack of any signal. The false-discard rate is real. TinyFish cannot fix it.
+
+Recommendation on record: shift budget from TinyFish LinkedIn targets to
+JSearch queries. JSearch returns 2000-char descriptions, classifies at 33%,
+and costs seconds instead of ~2 hours per run.
