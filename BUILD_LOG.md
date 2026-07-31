@@ -2343,3 +2343,140 @@ commits.
 623 tests pass, up from 575. No vendored `.py` file touched. No scan command
 run.
 
+
+## Revert the stat-tile dedup rule, raise the headline floor, fix two content defects - 2026-08-10
+
+### 1. Rule B (stat-tile restatement) removed
+
+Removed entirely rather than flag-gated: a path that defaults off and is
+contradicted by the quality reference is dead code that rots. Recoverable from
+commit 8624538 if it is ever wanted. Removed with it:
+`_is_stat_tile_restatement`, `_stat_tile_comparands`, `_norm_money`,
+`_STAT_FILLER_WORDS`, `_TOKEN_RE`, and the `build_fill_data()` pre-call in
+`_generate_deck` that existed only to feed it (which also removes the
+duplicated `[DECK EMPTY]`/`[DECK RETRY]` log lines per firm).
+
+A regression test now asserts `_is_stat_tile_restatement` and
+`_stat_tile_comparands` do not exist and that "Founded in 1970" /
+"Disclosed AUM: $700 million" survive, so the rule cannot come back by
+accident.
+
+Effect on the current builds: Choice NY goes back to all five bullets. The
+bullet Rule B used to strip there ("Manages a portfolio valued at $250 million
+(assets valued)") is retained.
+
+**Correction on the cited evidence.** The three Kingbird bullets given as
+justification — "Founded in 2008", "$4.4B (gross asset value) as of March 31,
+2026", "Multifamily-focused real estate investment manager" — **appear in no
+deck on this machine.** Searched all slide XML in 71 `.pptx` files across
+`referral-system/` and this repo: zero hits for any of the three, and none for
+"as of March 31, 2026". The generated Kingbird deck is unchanged since
+2026-07-29 22:40 and its slide 3 holds four bullets, no founded-year bullet,
+no GAV bullet, and every stat run blank:
+
+```
+Text 2  'Kingbird Investment Management is a test firm.'
+Text 3  'Vertically integrated multifamily investment manager operating since 2008.'
+        'Concentrated portfolio across Texas and the Southeast United States.'
+        'Uses LP, GP, and co-GP structures alongside preferred equity on individual deals.'
+        'Appointed a dedicated Director of Capital Markets in 2019.'
+Text 5/6/7   ''  ''  ''      <- AUM tile, all blank
+Text 9       ''              <- Founded tile value, blank
+```
+
+The revert stands on its own merits regardless: Rule B did strip three of five
+bullets in the build measured last commit, and that outcome was flagged then.
+The citation is recorded here only because it was the stated basis, and
+because it could not be used to calibrate the new floor.
+
+### 2. Rule A floor raised: containment plus a 0.70 ratio
+
+Was "any containment over 30 characters", which is too eager. Now the shorter
+side must also be at least 70% of the longer. Measured on real strings rather
+than guessed:
+
+| case | normalized | ratio | verdict |
+|---|---|---|---|
+| Neal bullet inside its own headline | 72 / 93 | **0.774** | drops |
+| a clause-sharing bullet inside a longer headline | 50 / 110 | **0.455** | kept |
+
+0.70 sits between them with margin either way. Exact duplicates and the
+"Firm described as X" lead-in forms still drop unconditionally — those are not
+judgement calls. The 30-character absolute floor stays.
+
+### 3. Two content defects fixed
+
+Both drop the bullet rather than rewrite it (HARD RULE 5: a hand-edited
+sentence reads as mutilated), and every drop is now reported through
+`progress()` with its reason (HARD RULE 4) instead of vanishing silently as
+the old dedup did.
+
+**`AUM displayed as $700 million`** — a statement about this slide's own stat
+tile, not about the firm. `_describes_the_deck` matches display/meta language:
+`displayed as/on/in`, `as displayed`, `shown as/on`, `this deck|slide|page`,
+`the deck|slide`, `stat tile`, `tile above`. Deliberately excludes "listed as"
+— "listed as one of the fastest-growing builders" is a real fact.
+
+**`Reportedly targeting $1 billion annual revenue (Business Observer, Apr
+2024)`** against `research["recent_event"]` = `Article noting $1 billion
+annual revenue (Business Observer, Apr 2024)`. "Targeting" converts a reported
+historical figure into a stated intention. `_misframes_a_research_figure`
+drops a bullet carrying forward-looking wording when the research fields that
+carry that figure state it as fact. Claim extraction is
+`fact_check.extract_numeric_claims` (called, not reimplemented) so
+"$1 billion" here and in `recent_event` normalize to the same `1B`.
+
+Scoped deliberately: a figure research has never heard of is the vendored
+ungrounded-claim guard's job, so "Targeting $5 billion in unrelated revenue"
+is not this rule's business.
+
+**Bug caught by a control case.** The first version checked research fields
+one at a time and dropped on the first field carrying the figure without
+forward wording. Raptor Group (wd_firms id 78) breaks that: its
+`disclosed_figure` is a bare `$200 million` while its `aum_display` reads
+`$200 million (fund target / fund size (Raptor Digital))` and its
+`recent_event` says `seeking`. A supported bullet ("Seeking $200M for its
+digital fund") was being dropped. Now EVERY field carrying the figure must
+lack forward wording before the framing counts as unsupported.
+
+### Why fact_check passed both, traced against Neal's real research
+
+`_drop_ungrounded_claims` -> `fact_check.unverifiable_claims()` is a **number**
+checker. It extracts numeric claims from the text and asks whether each
+appears in the corpus. Run against Neal's actual blob:
+
+```
+'AUM displayed as $700 million'
+    numeric claims extracted : ['700M']
+    unverifiable_claims()    : (none -> GROUNDED, ships)
+
+'Reportedly targeting $1 billion annual revenue (Business Observer, Apr 2024)'
+    numeric claims extracted : ['1B']
+    unverifiable_claims()    : (none -> GROUNDED, ships)
+```
+
+Both figures are in the research blob (`aum_display` `$700 million`,
+`recent_event` `$1 billion`), so both bullets come back with zero
+unverifiable claims. Nothing in the grounding path examines the words around
+the number — not `displayed as`, not `targeting` versus `noting`. Both
+defects keep the figure exactly right and change only the prose, which is
+precisely that guard's blind spot. `unverifiable_claims`'s own docstring scopes
+it to "numeric claims ... that do NOT appear anywhere in corpus_text"; it is
+working as designed and was never a claim-framing check.
+
+### Verified visually
+
+Both decks rebuilt from their real research blobs and rendered. Choice NY:
+five bullets, one tile, healthy slide. Neal: **one bullet.**
+
+**Flagging that plainly.** Neal's current build generated three bullets, two of
+which were factually defective, so the honest slide has one. The guards are
+doing the right thing (an honest blank beats a false claim in a client-facing
+document), but the deck is thin, and the fix is upstream: the content prompt is
+producing deck-self-description and tense substitutions in the first place.
+That is a `_CONTENT_PROMPT` change in vendored `deck_filler.py`, so it needs a
+donor filing rather than a local edit, and it is not attempted here.
+
+620 tests pass (was 623; the removed Rule B tests outnumber the added ones).
+No vendored `.py` file touched. No scan command run.
+

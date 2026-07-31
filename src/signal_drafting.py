@@ -1273,71 +1273,90 @@ def _norm_for_oneliner_compare(text: str) -> str:
     return _WS_RE.sub(" ", _strip_oneliner_lead_in(text).strip().rstrip(".")).lower()
 
 
-# Run-29 follow-up, regenerated Neal Communities deck: three of five slide-01
-# bullets restated something else already on the same slide.
+# Slide-01 profile bullet guards. Three rules, all of which DROP a bullet
+# rather than rewrite it -- HARD RULE 5: a hand-edited sentence reads as
+# mutilated, so a flagged block is replaced (here, removed), never patched.
+# Every drop is reported to progress() with its reason, never silently
+# (HARD RULE 4), matching deck_filler's own "[DECK DROP] ... reason=" lines.
 #
-#   "Founded in 1970"                        <- the Founded stat card ("1970")
-#   "Disclosed AUM: $700 million"            <- the AUM stat tile ("$700 million")
-#   "Homebuilder/developer focusing on
-#    single-family and townhome communities"  <- the italic firm_oneliner headline,
-#                                                minus its trailing " in Southwest Florida"
+# 1. HEADLINE RESTATEMENT. The vendored guard (_drop_oneliner_duplicate, FIX
+# 15) compares exact strings; the lead-in strip above extends that to "Firm
+# described as <oneliner>". Containment extends it once more, to the live Neal
+# case where the bullet was the headline minus its trailing " in Southwest
+# Florida".
 #
-# The exact-match guard above misses the third because it is a SUBSTRING of the
-# headline, not a prefix variant of it. Hence two additions:
+# The floor is deliberately high. A first version dropped ANY containment over
+# 30 characters, which is too eager: a bullet that merely shares a clause with
+# the headline is a different, narrower fact and belongs on the slide.
+# Measured on the real strings:
 #
-# (a) substring containment in EITHER direction, above a length floor. A
-# 30-character floor on the SHORTER side is what keeps a legitimately short
-# bullet from being eaten by an incidental appearance in a long headline
-# ("Multifamily" inside "...multifamily housing..." is not a restatement); the
-# live case clears it with 71 characters.
+#   near-exact (drop):     72/93 chars = 0.774   "Homebuilder/developer focusing on
+#                                                 single-family and townhome communities"
+#                                                inside its own headline
+#   shares a clause (keep): 50/110 chars = 0.455  "Multifamily-focused real estate
+#                                                 investment manager" inside a longer headline
 #
-# (b) a bullet that restates a POPULATED stat tile. The value alone is not
-# enough to drop on -- "Reported $1 billion annual revenue in Apr 2024
-# article" mentions a figure but is the slide's most interesting fact and no
-# tile shows it. The test is: the bullet contains the tile's own value AND,
-# once that value, the tile's label words, and connective filler are removed,
-# no substantive word is left. "Founded in 1970 by Pat Neal in Sarasota" keeps
-# pat/neal/sarasota and survives.
+# 0.70 sits between them with margin on both sides. Equality and the lead-in
+# prefix forms still drop unconditionally, ratio or not -- those are not
+# judgement calls.
+#
+# 2. THE BULLET DESCRIBES THE DECK, NOT THE FIRM. Live Neal bullet: "AUM
+# displayed as $700 million". That is a statement about this slide's own stat
+# tile, not a fact about the firm, and it reads as machine output in a
+# client-facing document.
+#
+# 3. FORWARD-LOOKING SUBSTITUTION. Live Neal bullet: "Reportedly targeting $1
+# billion annual revenue (Business Observer, Apr 2024)", where
+# research["recent_event"] reads "Article noting $1 billion annual revenue
+# (Business Observer, Apr 2024)". "Targeting" turns a reported historical
+# figure into a stated intention -- a factual substitution, and the kind of
+# thing a recipient can disprove.
+#
+# WHY fact_check LET BOTH THROUGH, traced against Neal's real research blob:
+# _drop_ungrounded_claims -> fact_check.unverifiable_claims() is a NUMBER
+# checker. It extracts numeric claims and asks whether each appears in the
+# corpus; "AUM displayed as $700 million" yields {"700M"} and "Reportedly
+# targeting $1 billion..." yields {"1B"}, and both figures ARE in the research
+# blob, so both come back with zero unverifiable claims and ship. The words
+# around the number -- "displayed as", "targeting" versus "noting" -- are
+# never examined by anything in the grounding path. Both defects keep the
+# number exactly right and change only the prose, which is precisely that
+# guard's blind spot. Rules 2 and 3 read the prose instead, here, in Workflow
+# D's own code.
 _MIN_ONELINER_OVERLAP_CHARS = 30
+_MIN_ONELINER_OVERLAP_RATIO = 0.70
 
-# "$4.4 billion" and a tile reading "$4.4B" are the same figure. Normalizing
-# the magnitude word to its initial is what lets containment see that; without
-# it the master's own "Manages $4.4 billion in gross asset value" bullet reads
-# as a different fact from its "$4.4B" tile.
-_MONEY_MAGNITUDE_RE = re.compile(r"(\d)\s*(?:billion|bn|b)\b", re.IGNORECASE)
-_MONEY_MILLION_RE = re.compile(r"(\d)\s*(?:million|mm|m)\b", re.IGNORECASE)
-_MONEY_TRILLION_RE = re.compile(r"(\d)\s*(?:trillion|tn|t)\b", re.IGNORECASE)
-_NUM_COMMA_RE = re.compile(r"(?<=\d),(?=\d{3})")
+# Display/meta language: the bullet is talking about the deck. Deliberately
+# does NOT include "listed as" -- "listed as one of the fastest-growing
+# builders" is a real fact about a firm, not deck self-description.
+_DECK_SELF_REFERENCE_RE = re.compile(
+    r"\b(?:"
+    r"display(?:ed|s|ing)?\s+(?:as|on|in|at)"
+    r"|as\s+display(?:ed|s)"
+    r"|shown\s+(?:as|on)"
+    r"|appears?\s+(?:on|in)\s+(?:this|the)\s+(?:deck|slide|page)"
+    r"|this\s+(?:deck|slide|page|document|presentation|report)"
+    r"|the\s+(?:deck|slide)\b"
+    r"|stat\s+tile|tile\s+above|card\s+above"
+    r")\b",
+    re.IGNORECASE,
+)
 
-# Connective/qualifier words that carry no fact of their own. A residue made
-# only of these (plus the tile's own label words) means the bullet said
-# nothing the tile did not already say.
-_STAT_FILLER_WORDS = frozenset({
-    "a", "an", "the", "of", "in", "at", "on", "to", "as", "is", "was", "are",
-    "were", "and", "or", "with", "its", "their", "has", "have", "had", "been",
-    "about", "approximately", "around", "roughly", "over", "under", "than",
-    "more", "less", "least", "nearly", "some", "total", "totaling", "totalling",
-    "currently", "now", "today", "reported", "reportedly", "reports",
-    "disclosed", "discloses", "stated", "states", "manages", "managing",
-    "management", "manager", "holds", "holding", "oversees", "operating",
-    "operates", "firm", "company", "since", "founded", "established", "est",
-    "year", "years", "circa", "per", "approx", "aum", "usd",
-})
-_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9'&/-]*")
-
-
-def _norm_money(text: str) -> str:
-    text = _NUM_COMMA_RE.sub("", (text or "").lower())
-    text = _MONEY_TRILLION_RE.sub(r"\1t", text)
-    text = _MONEY_MAGNITUDE_RE.sub(r"\1b", text)
-    text = _MONEY_MILLION_RE.sub(r"\1m", text)
-    return _WS_RE.sub(" ", text).strip()
+# Intention/aspiration, as opposed to a reported or historical figure.
+_FORWARD_LOOKING_RE = re.compile(
+    r"\b(?:"
+    r"target(?:s|ing|ed)?|aim(?:s|ing)?\s+(?:for|to)|goal[s]?\s+of"
+    r"|plan(?:s|ning)?\s+to|on\s+track\s+to|expect(?:s|ed|ing)?\s+to"
+    r"|project(?:s|ed|ing)?\s+to|forecast(?:s|ed|ing)?\s+to"
+    r"|seek(?:s|ing)?|hope[s]?\s+to|intend(?:s|ing)?\s+to"
+    r"|guidance\s+of|will\s+reach|to\s+reach|by\s+20\d\d"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 def _is_oneliner_restatement(bullet: str, oneliner: str) -> bool:
-    """True if the bullet says what the italic headline already says: equal
-    after lead-in stripping (the original guard), or one wholly contained in
-    the other above the length floor."""
+    """True if the bullet says what the italic headline already says."""
     b = _norm_for_oneliner_compare(bullet)
     o = _norm_for_oneliner_compare(oneliner)
     if not b or not o:
@@ -1347,64 +1366,79 @@ def _is_oneliner_restatement(bullet: str, oneliner: str) -> bool:
     shorter, longer = (b, o) if len(b) <= len(o) else (o, b)
     if len(shorter) < _MIN_ONELINER_OVERLAP_CHARS:
         return False
-    return shorter in longer
-
-
-def _is_stat_tile_restatement(bullet: str, tile_values: list, label_words: frozenset) -> bool:
-    """True if the bullet contains one of the populated tiles' values and adds
-    no other fact of its own."""
-    b = _norm_money(bullet)
-    if not b:
+    if shorter not in longer:
         return False
-    for value in tile_values:
-        v = _norm_money(value)
-        if not v:
-            continue
-        # Word-boundary match so a bare year ("1970") does not match inside
-        # "1970s" or a longer number, and so "$700m" needs to stand alone.
-        pattern = re.compile(r"(?<![a-z0-9])" + re.escape(v) + r"(?![a-z0-9])")
-        if not pattern.search(b):
-            continue
-        residue = pattern.sub(" ", b)
-        leftover = {w for w in _TOKEN_RE.findall(residue)
-                   if w not in _STAT_FILLER_WORDS and w not in label_words}
-        if not leftover:
-            return True
-    return False
+    return (len(shorter) / len(longer)) >= _MIN_ONELINER_OVERLAP_RATIO
 
 
-def _stat_tile_comparands(fill_data: dict) -> tuple[list, frozenset]:
-    """(values shown on populated tiles, words those tiles' labels use).
-
-    Exactly the three fill_data fields the tiles are filled from, read off
-    deck_filler's own output rather than re-derived from research -- so a
-    change in how it picks a figure can't silently desync this check. The
-    labels feed the residue test: "AUM" in "Disclosed AUM: $700 million" is
-    the tile's own caption, not a fact the bullet adds."""
-    fill_data = fill_data or {}
-    values = [str(fill_data.get(k) or "").strip()
-              for k in ("founded_year", "aum_value", "disclosed_figure")]
-    label_words = set()
-    for key in ("aum_label", "disclosed_label", "aum_asof"):
-        label_words.update(_TOKEN_RE.findall(_norm_money(str(fill_data.get(key) or ""))))
-    return [v for v in values if v], frozenset(label_words)
+def _describes_the_deck(bullet: str) -> bool:
+    return bool(_DECK_SELF_REFERENCE_RE.search(bullet or ""))
 
 
-def _drop_oneliner_duplicate_bullets(bullets: list, oneliner: str,
-                                     fill_data: Optional[dict] = None) -> list:
-    """Bullets with the slide-01 restatements removed: of the italic headline,
-    and of any populated stat tile. `fill_data` omitted skips the tile rule
-    (the headline rule alone is the pre-existing behavior)."""
-    tile_values, label_words = _stat_tile_comparands(fill_data)
+def _research_text_values(research: dict) -> list:
+    """Every string value in the research blob, list items included -- the
+    same "every field, not just numeric-looking ones" posture
+    fact_check.grounding_corpus takes, but kept as separate values so a
+    figure can be traced back to the ONE field that carries it."""
+    out = []
+    for value in (research or {}).values():
+        if isinstance(value, str):
+            out.append(value)
+        elif isinstance(value, (list, tuple)):
+            out.extend(v for v in value if isinstance(v, str))
+    return [v for v in out if v.strip()]
+
+
+def _misframes_a_research_figure(bullet: str, research: dict) -> Optional[str]:
+    """A reason string if the bullet frames a figure as an intention while the
+    research field that carries that figure states it as fact, else None.
+
+    Claim extraction is fact_check's own (called, not reimplemented), so
+    "$1 billion" here and "$1 billion" in recent_event normalize to the same
+    "1B" claim. A figure the research states as forward-looking in its own
+    right -- Raptor Group's "seeking $200M fund" -- is left alone, because the
+    source field carries the same framing the bullet does."""
+    if not _FORWARD_LOOKING_RE.search(bullet or ""):
+        return None
+    claims = fact_check.extract_numeric_claims(bullet or "")
+    if not claims:
+        return None
+    # EVERY research field carrying the figure has to lack forward-looking
+    # wording before the bullet's framing counts as unsupported. Caught by the
+    # Raptor Group control: its disclosed_figure is a bare "$200 million"
+    # while its aum_display says "fund target" -- checking fields one at a
+    # time and dropping on the first bare one would have flagged a bullet the
+    # research does in fact support.
+    sources, supporting = [], False
+    for value in _research_text_values(research):
+        if claims & fact_check.extract_numeric_claims(value):
+            sources.append(value)
+            if _FORWARD_LOOKING_RE.search(value):
+                supporting = True
+    if not sources or supporting:
+        return None
+    return (f"forward-looking framing unsupported: {sorted(claims & fact_check.extract_numeric_claims(sources[0]))} "
+            f"is stated as fact by research ({sources[0]!r}), not as a target")
+
+
+def _drop_bad_profile_bullets(bullets: list, oneliner: str,
+                             research: Optional[dict] = None) -> tuple[list, list]:
+    """(kept bullets, [(dropped bullet, reason), ...])."""
     has_oneliner = bool(_norm_for_oneliner_compare(oneliner))
-    kept = []
+    kept, dropped = [], []
     for bullet in (bullets or []):
         if has_oneliner and _is_oneliner_restatement(bullet, oneliner):
+            dropped.append((bullet, "restates the firm_oneliner headline"))
             continue
-        if tile_values and _is_stat_tile_restatement(bullet, tile_values, label_words):
+        if _describes_the_deck(bullet):
+            dropped.append((bullet, "describes the deck's own display, not the firm"))
+            continue
+        misframed = _misframes_a_research_figure(bullet, research or {})
+        if misframed:
+            dropped.append((bullet, misframed))
             continue
         kept.append(bullet)
-    return kept
+    return kept, dropped
 
 
 def _generate_deck(firm_name: str, research: dict, progress: Progress) -> Optional[str]:
@@ -1418,20 +1452,11 @@ def _generate_deck(firm_name: str, research: dict, progress: Progress) -> Option
         deck_content["tokens_used"] = gate_config.MAX_LLM_TOKENS_PER_FIRM
         oneliner = str((research or {}).get("firm_oneliner") or "").strip()
         if deck_content.get("profile_bullets"):
-            # The stat-tile rule needs the tile values, which only
-            # build_fill_data() produces -- and build_and_convert() calls it
-            # internally, AFTER the bullets are already baked in. So it is
-            # called here first, for its three tile fields only. That is free
-            # and deterministic: with tokens_used forced to the cap above, its
-            # one LLM path (the Part C retry) is declined, leaving a pure
-            # function over research + deck_content. build_and_convert() then
-            # recomputes the same values from the same research; none of the
-            # three depends on profile_bullets, so the tiles it fills are
-            # identical to the ones compared against here.
-            fill_data = deck_filler.build_fill_data(firm_name, research, deck_content,
-                                                    personalization={})
-            deck_content["profile_bullets"] = _drop_oneliner_duplicate_bullets(
-                deck_content["profile_bullets"], oneliner, fill_data)
+            kept, dropped = _drop_bad_profile_bullets(
+                deck_content["profile_bullets"], oneliner, research)
+            for bullet, reason in dropped:
+                progress(f"{firm_name}: profile bullet dropped ({reason}): {bullet!r}")
+            deck_content["profile_bullets"] = kept
         result = deck_filler.build_and_convert(firm_name, research, deck_content,
                                                progress=progress, personalization={})
     except Exception as e:  # noqa: BLE001 - a deck failure must never block a draft
