@@ -103,6 +103,12 @@ def install() -> None:
     global _installed
     if _installed:
         return
+    # The vendored adapter self-skips when JSEARCH_API_KEY is unset, returning
+    # [] before requests.get is ever reached -- so the pool would never fire.
+    # Seed the gate with key 1; the proxy rewrites the header per call anyway.
+    keys = _load_keys()
+    if keys and not os.getenv("JSEARCH_API_KEY"):
+        os.environ["JSEARCH_API_KEY"] = keys[0]
     from scanner.connectors.adapters import jsearch as _jsearch_module
     _jsearch_module.requests = _PooledRequests()
     _installed = True
