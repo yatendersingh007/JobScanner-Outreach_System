@@ -656,7 +656,8 @@ def _patch_common(monkeypatch, firms, postings_by_id, emails_by_name, senior_poc
     # test here that doesn't specifically want deck-generation behavior gets
     # the pre-existing "no deck" outcome; test_generate_deck_* below and the
     # dedicated draft_for_run deck tests cover the real behavior.
-    monkeypatch.setattr(sd, "_generate_deck", lambda firm_name, research, progress: None)
+    monkeypatch.setattr(sd, "_generate_deck",
+                        lambda firm_name, research, progress, **kw: None)
 
     monkeypatch.setattr(sd.gmail_client, "create_draft",
                         lambda to, subject, body, attach_path=None, progress=None:
@@ -818,45 +819,11 @@ def test_drop_bad_profile_bullets_handles_no_bullets_at_all():
     assert sd._drop_bad_profile_bullets([], _ONELINER) == ([], [])
 
 
-def test_generate_deck_strips_the_duplicate_oneliner_bullet_before_build(monkeypatch):
-    monkeypatch.setattr(
-        sd.deck_filler, "get_deck_content",
-        lambda firm_name, research, personalization: {
-            "profile_bullets": [
-                "Operates in the New York metropolitan area",
-                f"Firm described as {_ONELINER}",
-            ],
-        },
-    )
-    captured = {}
-
-    def fake_build_and_convert(firm_name, research, deck_content, progress=None, personalization=None):
-        captured["profile_bullets"] = list(deck_content.get("profile_bullets") or [])
-        return {"pptx_path": None, "pdf_path": "x.pdf", "fill_data": {}}
-
-    monkeypatch.setattr(sd.deck_filler, "build_and_convert", fake_build_and_convert)
-
-    sd._generate_deck("Choice NY", {"firm_oneliner": _ONELINER}, progress=lambda m: None)
-
-    assert captured["profile_bullets"] == ["Operates in the New York metropolitan area"]
-
-
-def test_generate_deck_leaves_bullets_alone_when_research_has_no_oneliner(monkeypatch):
-    bullets = ["Operates in the New York metropolitan area", "Firm described as something"]
-    monkeypatch.setattr(sd.deck_filler, "get_deck_content",
-                        lambda firm_name, research, personalization: {"profile_bullets": list(bullets)})
-    captured = {}
-
-    def fake_build_and_convert(firm_name, research, deck_content, progress=None, personalization=None):
-        captured["profile_bullets"] = list(deck_content.get("profile_bullets") or [])
-        return {"pptx_path": None, "pdf_path": "x.pdf", "fill_data": {}}
-
-    monkeypatch.setattr(sd.deck_filler, "build_and_convert", fake_build_and_convert)
-
-    sd._generate_deck("Acme", {}, progress=lambda m: None)
-
-    assert captured["profile_bullets"] == bullets
-
+# The two tests that used to live here asserted that _generate_deck FILTERS
+# the model's profile bullets. Slide 01 no longer sources bullets from the
+# model at all (run-30), so there is nothing to filter -- the replacement
+# behaviour is pinned by test_generate_deck_discards_the_models_profile_
+# bullets further down. The guards themselves are still unit-tested above.
 
 # ---------------------------------------------------------------------------
 # _delete_empty_deck_shapes: run 27 follow-up, Choice NY + Neal Communities
@@ -882,7 +849,15 @@ def _xfrm(y_inches):
 
 
 def _shape(shape_id, name, text=None, y=None):
-    body = "" if text is None else f'<p:txBody><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody>'
+    """`text` may be a list of run strings -- the master's footer text box
+    (Text 13) carries TWO runs, a bold-italic label and an italic value, and
+    _write_footer_focus writes each separately."""
+    if text is None:
+        body = ""
+    else:
+        runs = text if isinstance(text, (list, tuple)) else [text]
+        inner = "".join(f"<a:r><a:t>{r}</a:t></a:r>" for r in runs)
+        body = f"<p:txBody><a:p>{inner}</a:p></p:txBody>"
     return (f'<p:sp><p:nvSpPr><p:cNvPr id="{shape_id}" name="{name}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>'
            f'{_xfrm(y)}{body}</p:sp>')
 
@@ -914,7 +889,7 @@ def _slide3_xml(aum_value="", aum_label="", aum_asof="", founded_year="", capita
         + _shape(12, "Text 10", "Founded" if founded_year else "", y=y(3.54))
         + _shape(13, "Text 11", "Investing since" if founded_year else "", y=y(3.96))
         + _shape(14, "Shape 12", y=y(4.95))                                 # capital-stack footer container
-        + _shape(15, "Text 13", capital_stack, y=y(4.95))
+        + _shape(15, "Text 13", ["Capital stack complexity:  ", capital_stack], y=y(4.95))
         + extra_shapes
         + "</p:sld>"
     )
@@ -1492,7 +1467,8 @@ def test_draft_for_run_attaches_the_deck_when_generation_succeeds(monkeypatch):
     emails = {"Firm A": ("jane@x.example", "verified")}
     created, recorded = _patch_common(monkeypatch, firms, postings, emails)
     monkeypatch.setattr(sd, "_generate_deck",
-                        lambda firm_name, research, progress: "generated_decks_c/Firm_A_Pitch.pdf")
+                        lambda firm_name, research, progress, **kw:
+                        "generated_decks_c/Firm_A_Pitch.pdf")
     gmail_calls = []
     monkeypatch.setattr(sd.gmail_client, "create_draft",
                         lambda to, subject, body, attach_path=None, progress=None:
@@ -1988,32 +1964,6 @@ def test_drop_bad_bullets_without_research_applies_only_the_first_two_rules():
     assert len(dropped) == 1
 
 
-def test_generate_deck_logs_every_dropped_bullet_with_its_reason(monkeypatch):
-    """HARD RULE 4: a dropped block is logged with stage and reason, never
-    silently."""
-    seen, progressed = {}, []
-    monkeypatch.setattr(sd.deck_filler, "get_deck_content",
-                        lambda firm_name, research, personalization: {
-                            "profile_bullets": [
-                                "Operates in Southwest Florida (Sarasota/Lakewood Ranch), US",
-                                "Reportedly targeting $1 billion annual revenue (Business Observer, Apr 2024)",
-                                "AUM displayed as $700 million"],
-                            "fit_paragraphs": {}})
-
-    def fake_build_and_convert(firm_name, research, deck_content, progress=None, personalization=None):
-        seen["bullets"] = list(deck_content["profile_bullets"])
-        return {"pptx_path": None, "pdf_path": "deck.pdf", "fill_data": {}}
-
-    monkeypatch.setattr(sd.deck_filler, "build_and_convert", fake_build_and_convert)
-
-    result = sd._generate_deck("Neal Communities of Southwest Florida, Inc.",
-                               _NEAL_RESEARCH, progress=progressed.append)
-
-    assert result == "deck.pdf"
-    assert seen["bullets"] == ["Operates in Southwest Florida (Sarasota/Lakewood Ranch), US"]
-    assert any("profile bullet dropped" in m and "describes the deck" in m for m in progressed)
-    assert any("profile bullet dropped" in m and "unsupported" in m for m in progressed)
-
 
 def test_generate_deck_no_longer_precomputes_fill_data(monkeypatch):
     """The stat-tile rule was the only reason to call build_fill_data() before
@@ -2033,3 +1983,382 @@ def test_generate_deck_no_longer_precomputes_fill_data(monkeypatch):
     sd._generate_deck("Neal", _NEAL_RESEARCH, progress=lambda m: None)
 
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# Slide-01 bullets are COMPOSED from research, not generated (run-30).
+#
+# Six rounds of guarding model prose failed the same way: each guard caught one
+# tense variant and the next generation invented another ("targeting", then
+# "eyeing"). These tests pin the replacement: templated scaffolding plus
+# VERBATIM field values, so no wording the model chooses can reach slide 01.
+#
+# Research values below are copied from wd_firms ids 66 and 72.
+# ---------------------------------------------------------------------------
+_C_RESEARCH = {
+    "founded_year": "",
+    "geography": "New York metropolitan area",
+    "recent_event": "Sold to Associa Corp. in 2021 (earn-out noted)",
+    "own_domain": "choicenewyork.com",
+    "domain": "choicenewyork.com",
+    "aum_display": "$250 million (assets valued)",
+    "disclosed_figure": "$250 million",
+    "disclosed_label": "assets valued",
+    "capital_stack": "",
+    "firm_oneliner": "Residential & mixed-use property management, third-party operator",
+}
+_N_RESEARCH = {
+    "founded_year": "1970",
+    "geography": "Southwest Florida (Sarasota/Lakewood Ranch), US",
+    "recent_event": "Article noting $1 billion annual revenue (Business Observer, Apr 2024)",
+    "own_domain": "nealcommunities.com",
+    "domain": "nealcommunities.com",
+    "aum_display": "$700 million",
+    "disclosed_figure": "$700 million",
+    "disclosed_label": "AUM",
+    "capital_stack": "",
+    "firm_oneliner": ("Homebuilder/developer focusing on single-family and townhome "
+                     "communities in Southwest Florida"),
+}
+
+
+# --- per-field templating --------------------------------------------------
+def test_compose_founded_year_field():
+    assert sd.compose_profile_bullets({"founded_year": "1970"})[0] == "Founded in 1970"
+
+
+def test_compose_geography_field():
+    assert sd.compose_profile_bullets(
+        {"geography": "Southwest Florida (Sarasota/Lakewood Ranch), US"}
+    )[0] == "Operates in Southwest Florida (Sarasota/Lakewood Ranch), US"
+
+
+def test_compose_domain_field_is_bare():
+    """No scaffolding at all on the domain line."""
+    assert sd.compose_profile_bullets({"own_domain": "nealcommunities.com"})[0] == "nealcommunities.com"
+
+
+def test_compose_domain_falls_back_to_domain_when_own_domain_is_missing():
+    assert sd.compose_profile_bullets({"domain": "example.com"})[0] == "example.com"
+
+
+def test_compose_subcategory_field():
+    assert sd.compose_profile_bullets({}, "Real Estate", "Property Accounting") == [
+        "Focus: Property Accounting"]
+
+
+def test_compose_recent_event_gets_a_lead_in_when_not_a_sentence():
+    """The live Neal value: capitalized but ends on a bracket, so it is a noun
+    phrase and takes the "Reported: " lead-in."""
+    event = "Article noting $1 billion annual revenue (Business Observer, Apr 2024)"
+
+    assert sd.compose_profile_bullets({"recent_event": event}) == [f"Reported: {event}"]
+
+
+def test_compose_recent_event_is_used_verbatim_when_already_a_sentence():
+    event = "The firm opened a second regional office in 2025."
+
+    assert sd.compose_profile_bullets({"recent_event": event}) == [event]
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("The firm opened an office in 2025.", True),
+    ("Really?", True),
+    ("Sold to Associa Corp. in 2021 (earn-out noted)", False),   # ends on a bracket
+    ("Article noting $1 billion annual revenue", False),         # no terminal punctuation
+    ("sold to Associa Corp. in 2021.", False),                   # no initial capital
+    ("", False),
+])
+def test_is_sentence(text, expected):
+    assert sd._is_sentence(text) is expected
+
+
+@pytest.mark.parametrize("event", ["", None, "   ", "None"])
+def test_compose_skips_an_absent_recent_event(event):
+    assert sd.compose_profile_bullets({"recent_event": event}) == []
+
+
+@pytest.mark.parametrize("research", [{}, None])
+def test_compose_with_no_research_at_all(research):
+    assert sd.compose_profile_bullets(research) == []
+
+
+def test_compose_never_paraphrases_a_field_value():
+    """Every payload, with its fixed scaffold stripped, must be a verbatim
+    substring of the field it came from. This is the property that makes the
+    "targeting"/"eyeing" drift class impossible rather than guarded."""
+    research = dict(_N_RESEARCH)
+    bullets = sd.compose_profile_bullets(research, "Real Estate", "Fund Operations/Back Office")
+    scaffolds = ("Founded in ", "Operates in ", "Reported: ", "Focus: ", "AUM basis: ")
+    sources = [v for v in research.values() if isinstance(v, str) and v.strip()]
+    sources += ["Real Estate", "Fund Operations/Back Office"]
+
+    for bullet in bullets:
+        payload = bullet
+        for scaffold in scaffolds:
+            if payload.startswith(scaffold):
+                payload = payload[len(scaffold):]
+                break
+        assert any(payload in source for source in sources), payload
+
+
+# --- declared order -------------------------------------------------------
+def test_compose_order_is_founding_location_figures_focus_domain():
+    bullets = sd.compose_profile_bullets(_N_RESEARCH, "Real Estate", "Fund Operations/Back Office")
+
+    assert bullets == [
+        "Founded in 1970",
+        "Operates in Southwest Florida (Sarasota/Lakewood Ranch), US",
+        "Reported: Article noting $1 billion annual revenue (Business Observer, Apr 2024)",
+        "Focus: Fund Operations/Back Office",
+        "nealcommunities.com",
+    ]
+
+
+def test_compose_live_choice_ny_row():
+    """No founded_year, so four bullets -- exactly at the floor, no top-ups."""
+    bullets = sd.compose_profile_bullets(_C_RESEARCH, "Real Estate", "Property Accounting")
+
+    assert bullets == [
+        "Operates in New York metropolitan area",
+        "Reported: Sold to Associa Corp. in 2021 (earn-out noted)",
+        "Focus: Property Accounting",
+        "choicenewyork.com",
+    ]
+    assert not any(b.startswith("AUM basis:") for b in bullets)
+
+
+# --- bullet-count floor ---------------------------------------------------
+def test_floor_adds_the_aum_basis_line_when_short():
+    """Two fields only -> below the floor -> the AUM basis is added, in the
+    scale/figures band (after location, before focus)."""
+    research = {"geography": "Austin, TX", "aum_display": "$400 million (AUM)",
+                "own_domain": "example.com"}
+
+    bullets = sd.compose_profile_bullets(research, "Real Estate", "Property Accounting")
+
+    assert bullets == [
+        "Operates in Austin, TX",
+        "AUM basis: $400 million (AUM)",
+        "Focus: Property Accounting",
+        "example.com",
+    ]
+
+
+def test_floor_aum_basis_does_not_double_print_the_label():
+    """icp_gate builds aum_display AS "<figure> (<label>)", so a literal
+    "{aum_display} ({disclosed_label})" template would emit "$250 million
+    (assets valued) (assets valued)"."""
+    line = sd._aum_basis_bullet(_C_RESEARCH)
+
+    assert line == "AUM basis: $250 million (assets valued)"
+    assert line.count("assets valued") == 1
+
+
+def test_floor_aum_basis_builds_from_disclosed_fields_when_display_is_empty():
+    assert sd._aum_basis_bullet(
+        {"disclosed_figure": "$1.2B", "disclosed_label": "gross asset value"}
+    ) == "AUM basis: $1.2B (gross asset value)"
+    assert sd._aum_basis_bullet({"disclosed_figure": "$1.2B"}) == "AUM basis: $1.2B"
+    assert sd._aum_basis_bullet({}) == ""
+
+
+def test_floor_adds_a_client_safe_icp_reason():
+    research = {"geography": "Austin, TX", "own_domain": "example.com"}
+
+    bullets = sd.compose_profile_bullets(
+        research, "Real Estate", "Property Accounting",
+        icp_reason="Operator-verified portfolio of 4,000 apartment units")
+
+    assert "Operator-verified portfolio of 4,000 apartment units" in bullets
+    assert len(bullets) >= sd._BULLET_FLOOR
+
+
+@pytest.mark.parametrize("reason", [
+    "QUALIFIED (operator-verified AUM $700M)",                 # live Neal value
+    "QUALIFIED (est. $250M — portfolio value proxy (manages assets valued at over $250 million))",
+    "PARKED (est. $0M from square footage tertiary proxy — derived, not disclosed; verify manually)",
+    "Not an accepted firm type (RE/family office/PE-RE/property management), disqualified",
+])
+def test_floor_rejects_internal_gate_language(reason):
+    """Gate verdict strings are qualification bookkeeping, and the gate writes
+    them with an em dash CLAUDE.md bans. Neither belongs in front of a
+    prospect, so neither becomes a bullet even when the slide is short."""
+    research = {"geography": "Austin, TX", "own_domain": "example.com"}
+
+    bullets = sd.compose_profile_bullets(research, "Real Estate", "Property Accounting",
+                                        icp_reason=reason)
+
+    assert reason not in bullets
+
+
+def test_floor_never_pads_with_filler():
+    """One field and nothing derivable: the slide ships with one bullet rather
+    than inventing content (HARD RULE 5)."""
+    assert sd.compose_profile_bullets({"own_domain": "example.com"}) == ["example.com"]
+
+
+def test_floor_does_not_top_up_once_it_is_met():
+    bullets = sd.compose_profile_bullets(_N_RESEARCH, "Real Estate", "Fund Operations/Back Office")
+
+    assert len(bullets) == 5
+    assert not any(b.startswith("AUM basis:") for b in bullets)
+
+
+# --- navy footer fallback -------------------------------------------------
+def test_footer_falls_back_to_category_and_subcategory():
+    assert sd.footer_focus_text("", "Real Estate", "Property Accounting") == \
+        "Real Estate · Property Accounting"
+
+
+def test_footer_keeps_a_real_capital_stack():
+    """The fallback never displaces real data."""
+    assert sd.footer_focus_text("LP, GP, Co-GP", "Real Estate", "Property Accounting") == ""
+
+
+@pytest.mark.parametrize("category,subcategory,expected", [
+    ("Real Estate", "", "Real Estate"),
+    ("", "Property Accounting", "Property Accounting"),
+    ("", "", ""),
+])
+def test_footer_with_only_one_side_populated(category, subcategory, expected):
+    assert sd.footer_focus_text("", category, subcategory) == expected
+
+
+def test_footer_bar_is_written_not_deleted_when_focus_is_available(tmp_path):
+    """Regression: the bar used to be deleted whenever capital_stack was
+    empty. With a category to fall back on it must survive, carrying "Focus: "
+    in its bold label run and the value in its italic value run."""
+    xml = _slide3_xml(aum_value="$250 million", aum_label="Assets Valued", capital_stack="")
+    path = _make_test_pptx(tmp_path, xml)
+
+    changed = sd._delete_empty_deck_shapes(
+        path, {"aum_value": "$250 million", "aum_label": "Assets Valued",
+              "founded_year": "", "capital_stack": ""},
+        category="Real Estate", subcategory="Property Accounting")
+
+    assert changed is True
+    names = _shape_names(path)
+    assert "Shape 12" in names and "Text 13" in names
+    with zipfile.ZipFile(path) as z:
+        slide = z.read("ppt/slides/slide3.xml").decode("utf-8")
+    assert f"Real Estate{sd._FOOTER_SEPARATOR}Property Accounting" in slide
+
+
+def test_footer_bar_is_still_deleted_when_everything_is_empty(tmp_path):
+    xml = _slide3_xml(aum_value="$250 million", aum_label="Assets Valued", capital_stack="")
+    path = _make_test_pptx(tmp_path, xml)
+
+    sd._delete_empty_deck_shapes(
+        path, {"aum_value": "$250 million", "aum_label": "Assets Valued",
+              "founded_year": "", "capital_stack": ""},
+        category="", subcategory="")
+
+    names = _shape_names(path)
+    assert "Shape 12" not in names and "Text 13" not in names
+
+
+def test_write_footer_focus_escapes_xml_special_characters():
+    xml = ("<p:sld><p:sp><p:nvSpPr><p:cNvPr id=\"1\" name=\"Text 13\"/></p:nvSpPr>"
+           "<p:spPr/><p:txBody><a:p><a:r><a:t>Capital stack complexity:  </a:t></a:r>"
+           "<a:r><a:t>LP, GP</a:t></a:r></a:p></p:txBody></p:sp></p:sld>")
+
+    patched = sd._write_footer_focus(xml, f"Retail & Industrial{sd._FOOTER_SEPARATOR}A<B")
+
+    assert "<a:t>Focus: </a:t>" in patched
+    assert f"Retail &amp; Industrial{sd._FOOTER_SEPARATOR}A&lt;B" in patched
+    from xml.etree import ElementTree as _ET
+    _ET.fromstring(patched.replace("<p:", "<p_").replace("</p:", "</p_")
+                  .replace("<a:", "<a_").replace("</a:", "</a_"))
+
+
+def test_write_footer_focus_leaves_an_unexpected_shape_alone():
+    """Only two runs are expected. Anything else and it is not the shape this
+    knows how to write."""
+    one_run = ("<p:sld><p:sp><p:nvSpPr><p:cNvPr id=\"1\" name=\"Text 13\"/></p:nvSpPr>"
+               "<p:spPr/><p:txBody><a:p><a:r><a:t>only one</a:t></a:r></a:p></p:txBody></p:sp></p:sld>")
+
+    assert sd._write_footer_focus(one_run, "Real Estate") == one_run
+    assert sd._write_footer_focus("<p:sld></p:sld>", "Real Estate") == "<p:sld></p:sld>"
+
+
+# --- no LLM in the slide-01 bullet path -----------------------------------
+def test_generate_deck_discards_the_models_profile_bullets(monkeypatch):
+    """get_deck_content() is still called, for slide 12's fit paragraphs. Its
+    profile_bullets never reach the deck -- whatever it returns, including the
+    "eyeing" drift this change exists to make impossible, is replaced."""
+    seen = {}
+    monkeypatch.setattr(
+        sd.deck_filler, "get_deck_content",
+        lambda firm_name, research, personalization: {
+            "profile_bullets": ["Eyeing $5 billion in revenue by 2030",
+                               "Targeting nationwide expansion",
+                               "AUM displayed as $700 million"],
+            "fit_paragraphs": {"property_accounting": "kept"}})
+
+    def fake_build_and_convert(firm_name, research, deck_content, progress=None, personalization=None):
+        seen["bullets"] = list(deck_content["profile_bullets"])
+        seen["fit"] = dict(deck_content["fit_paragraphs"])
+        return {"pptx_path": None, "pdf_path": "deck.pdf", "fill_data": {}}
+
+    monkeypatch.setattr(sd.deck_filler, "build_and_convert", fake_build_and_convert)
+
+    result = sd._generate_deck("Neal Communities of Southwest Florida, Inc.", _N_RESEARCH,
+                               progress=lambda m: None, category="Real Estate",
+                               subcategory="Fund Operations/Back Office")
+
+    assert result == "deck.pdf"
+    assert seen["bullets"] == [
+        "Founded in 1970",
+        "Operates in Southwest Florida (Sarasota/Lakewood Ranch), US",
+        "Reported: Article noting $1 billion annual revenue (Business Observer, Apr 2024)",
+        "Focus: Fund Operations/Back Office",
+        "nealcommunities.com",
+    ]
+    # not one word of the model's bullets survived
+    for invented in ("Eyeing", "Targeting", "displayed as"):
+        assert not any(invented in b for b in seen["bullets"])
+    # the fit paragraphs it IS still trusted for came through untouched
+    assert seen["fit"] == {"property_accounting": "kept"}
+
+
+def test_generate_deck_composes_bullets_even_when_the_model_returns_none(monkeypatch):
+    """No dependency on the model's bullet list existing at all."""
+    seen = {}
+    monkeypatch.setattr(sd.deck_filler, "get_deck_content",
+                        lambda firm_name, research, personalization: {
+                            "profile_bullets": [], "fit_paragraphs": {}})
+
+    def fake_build_and_convert(firm_name, research, deck_content, progress=None, personalization=None):
+        seen["bullets"] = list(deck_content["profile_bullets"])
+        return {"pptx_path": None, "pdf_path": "deck.pdf", "fill_data": {}}
+
+    monkeypatch.setattr(sd.deck_filler, "build_and_convert", fake_build_and_convert)
+
+    sd._generate_deck("Choice NY Property Management LLC", _C_RESEARCH,
+                      progress=lambda m: None, category="Real Estate",
+                      subcategory="Property Accounting")
+
+    assert seen["bullets"] == [
+        "Operates in New York metropolitan area",
+        "Reported: Sold to Associa Corp. in 2021 (earn-out noted)",
+        "Focus: Property Accounting",
+        "choicenewyork.com",
+    ]
+
+
+def test_generate_deck_reports_the_composed_bullet_count(monkeypatch):
+    monkeypatch.setattr(sd.deck_filler, "get_deck_content",
+                        lambda firm_name, research, personalization: {
+                            "profile_bullets": [], "fit_paragraphs": {}})
+    monkeypatch.setattr(
+        sd.deck_filler, "build_and_convert",
+        lambda firm_name, research, deck_content, progress=None, personalization=None: {
+            "pptx_path": None, "pdf_path": "deck.pdf", "fill_data": {}})
+    progressed = []
+
+    sd._generate_deck("Neal", _N_RESEARCH, progress=progressed.append,
+                      category="Real Estate", subcategory="Fund Operations/Back Office")
+
+    assert any("composed 5 bullet(s) from research fields" in m for m in progressed)
+

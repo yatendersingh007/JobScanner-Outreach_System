@@ -2543,3 +2543,154 @@ which masks the employer in the posting, and do not expose first-party ATS
 feeds. Job-posting scanning is a weak channel for this ICP regardless of
 further engineering. Run 27 measured the ceiling: 227 postings -> 16 companies
 gated -> 1 qualified firm surviving every check.
+
+## Slide-01 bullets composed from research instead of generated - 2026-08-11
+
+Six rounds of guarding the model's prose failed the same way each time: each
+guard caught one tense variant and the next generation invented another
+("targeting", then "eyeing"). The failure class is open, so a seventh verb
+blocklist was never going to close it. Slide 01 no longer sources bullets from
+the model.
+
+### 1. Deterministic composition
+
+`compose_profile_bullets(research, category, subcategory, icp_reason)` templates
+the research blob's own fields. Every field value is inserted VERBATIM; the only
+text this module authors is fixed scaffolding (`Founded in `, `Operates in `,
+`Reported: `, `Focus: `, `AUM basis: `), each a constant in the file. Order is
+founding, location, scale/figures, focus, domain.
+
+| field | line |
+|---|---|
+| `founded_year` | `Founded in {founded_year}` |
+| `geography` | `Operates in {geography}` |
+| `recent_event` | verbatim, or `Reported: {recent_event}` if it is not a sentence |
+| `subcategory` | `Focus: {subcategory}` |
+| `own_domain` (else `domain`) | `{domain}` |
+
+"Is a sentence" needs both ends: an initial capital AND terminal punctuation.
+Neal's `Article noting $1 billion annual revenue (Business Observer, Apr 2024)`
+has the capital but ends on a bracket, so it is a noun phrase and takes the
+lead-in.
+
+`get_deck_content()` is still called, because slide 12's fit paragraphs are
+genuinely generative. Its `profile_bullets` are discarded unread. A test feeds
+it `["Eyeing $5 billion in revenue by 2030", "Targeting nationwide expansion",
+"AUM displayed as $700 million"]` and asserts not one word survives, while the
+fit paragraphs pass through untouched.
+
+The three LLM-output guards from previous commits still run on the composed
+bullets as defense in depth. They are no-ops in practice and kept rather than
+deleted so that re-enabling model-authored bullets cannot silently ship
+unguarded prose.
+
+**Verified on both live rows** by composing, building the real deck, and reading
+back `ppt/slides/slide3.xml`: every bullet's payload, with its scaffold
+stripped, is a verbatim substring of the field it came from. All five Neal
+bullets and all four Choice bullets also survive the vendored guards
+(`_drop_estimated_money_mentions`, `_drop_ungrounded_claims`,
+`_drop_marketing_language`, `_cap_bullets`) unchanged.
+
+One vendored interaction worth knowing: `_cap_bullets` truncates any bullet
+over 18 words and appends a period. Both live firms' longest composed line is
+11 words, and the templates are short by construction, but a very long
+`recent_event` would be cut mid-phrase. Not worked around here.
+
+### 2. Bullet-count floor
+
+Below four bullets, grounded derivable lines are inserted in the scale/figures
+band (not appended after the domain, so the declared order holds):
+
+- **AUM basis.** Deviates from a literal `{aum_display} ({disclosed_label})`:
+  icp_gate builds `aum_display` AS `f"{disclosed_figure} ({disclosed_label})"`,
+  so that template double-prints the label — `$250 million (assets valued)
+  (assets valued)` on the live Choice NY row. Uses `aum_display` verbatim, or
+  `{disclosed_figure} ({disclosed_label})` when display is empty.
+- **icp_reason**, only when client-safe.
+
+Never generic filler: a firm with one usable field ships one bullet.
+
+**The icp_reason line is rejected for both live firms, by design.** Gate verdict
+strings are internal qualification bookkeeping — `QUALIFIED (est. $250M —
+portfolio value proxy (manages assets valued at over $250 million))` — and the
+gate writes them with the em dash CLAUDE.md bans as an AI tell. Neither belongs
+in front of a prospect. `_ICP_REASON_UNSAFE_RE` rejects em/en dashes, the
+verdict words, and `est.`/`proxy`/`unverified`/`tertiary`/`verify manually`. It
+is a real path for cleaner future reasons; today it never fires, and the tests
+say so explicitly.
+
+Live floor behaviour: Neal 5 bullets (no top-up), Choice NY 4 (exactly at the
+floor, no top-up), a geography+domain-only firm 4 (AUM basis added).
+
+### 3. Navy footer fallback
+
+With `capital_stack` empty, the bar now carries `Focus: {category} ·
+{subcategory}` instead of being deleted; it is deleted only when all three are
+empty. A populated `capital_stack` always wins — this is a fallback, not a
+replacement.
+
+The bar's own two runs are written separately: `Focus: ` into the bold-italic
+label run and the value into the italic value run, preserving the label/value
+styling the master intended rather than flattening both into one run. Values
+are XML-escaped, and the write is skipped unless the shape resolves exactly
+once with exactly its two expected runs.
+
+This is what actually fills the dead lower third of slide 01 — 72 of 83
+`wd_firms` rows have an empty `capital_stack`, so the bar was being deleted
+almost always.
+
+### 4. Bullet-box height: writable, but shrinking it is a no-op. Not implemented.
+
+Reported before implementing, as asked.
+
+**Writable: yes**, though not from deck_filler's fill layer — that layer only
+rewrites `<a:t>` runs by design ("never rebuilds the deck"). It is writable
+from Workflow D's own post-build XML pass, which already rewrites `<a:off>` for
+stat-card and fit-row reflow; `<a:ext cy>` is the same operation on a sibling
+attribute of the same element.
+
+**But it would change nothing on screen.** The master's bullet box (slide3.xml,
+`Text 3`) is:
+
+```
+<a:xfrm><a:off x="457200" y="2148840"/><a:ext cx="5760720" cy="2651760"/></a:xfrm>
+<a:noFill/><a:ln></a:ln>
+<a:bodyPr wrap="square" lIns="0" tIns="0" rIns="0" bIns="0" anchor="t">
+```
+
+`anchor="t"` with `tIns="0"` and no autofit (`normAutofit` and `spAutoFit` both
+absent) means the first line sits exactly on the box's top edge and every line
+below it at a fixed offset from there. Reducing `cy` moves only the box's
+BOTTOM edge, and the box has no fill and no outline, so its bounds are
+invisible. Not one glyph moves.
+
+The premise that "3-4 bullets float in a box sized for six" does not hold: the
+bullets are pinned to the top already. The visible emptiness was the region
+BELOW the text, which is now filled by the footer fallback (item 3) rather than
+by resizing an invisible rectangle. Implementing the resize would add a
+fragile geometry write with zero visual effect, so it is not implemented.
+
+What WOULD change that region, if more is wanted later: moving the stat cards
+and footer up toward the text, or widening the bullet column into the vacated
+right column when no tile is populated. Both are real layout changes with real
+overflow risk, and neither was asked for.
+
+### Verified visually
+
+Both decks regenerated from their real research blobs and rendered. Neal:
+five bullets, both tiles, populated navy footer, no dead space. Choice NY: four
+bullets, one tile, populated footer.
+
+**One thing to decide.** Items 1 and 3 both surface the focus, so the slide now
+shows `Focus: Fund Operations/Back Office` as a bullet AND `Focus: Real Estate ·
+Fund Operations/Back Office` in the footer. Visible repetition, in both
+renders. The footer is strictly more informative (it adds the category). Both
+were specified separately so both are implemented as asked, but dropping the
+bullet when the footer carries the same subcategory is a one-line change if
+wanted — note it would push Choice NY to three bullets and trigger the AUM-basis
+top-up.
+
+661 tests pass. Three tests that asserted the old "filter the model's bullets"
+behaviour were removed (that behaviour no longer exists); the guards themselves
+are still unit-tested. No vendored `.py` file touched. No scan command run.
+

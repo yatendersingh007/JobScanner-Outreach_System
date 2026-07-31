@@ -1203,11 +1203,22 @@ def _apply_deck_shape_stack(xml: str, stack: _DeckShapeStack, fill_data: dict) -
     return xml
 
 
-def _delete_empty_deck_shapes(pptx_path, fill_data: dict) -> bool:
+def _delete_empty_deck_shapes(pptx_path, fill_data: dict, category: str = "",
+                              subcategory: str = "") -> bool:
     """Applies every _DECK_SHAPE_STACKS entry to the deck in place. Returns
     True if the file was rewritten (the caller must re-run PDF conversion in
-    that case)."""
+    that case).
+
+    `category`/`subcategory` feed the navy footer's fallback: with no
+    capital_stack the bar carries "Focus: <category> · <subcategory>" instead
+    of being deleted. Once it carries that, capital_stack counts as populated
+    for the stack pass, so the bar and its text box survive."""
     import zipfile as _zipfile
+
+    footer_value = footer_focus_text(str((fill_data or {}).get("capital_stack") or ""),
+                                     category, subcategory)
+    if footer_value:
+        fill_data = {**(fill_data or {}), "capital_stack": footer_value}
 
     slot_map = deck_filler.load_slot_map()
     plan: list[tuple[str, _DeckShapeStack]] = []
@@ -1223,6 +1234,18 @@ def _delete_empty_deck_shapes(pptx_path, fill_data: dict) -> bool:
         contents = {n: zin.read(n) for n in names}
 
     changed = False
+    # Footer text first, so the stack pass below sees a populated bar and
+    # leaves it alone rather than deleting what was just written.
+    if footer_value:
+        slide_no = _slide_no_for_key(slot_map, "capital_stack")
+        member = f"ppt/slides/slide{slide_no}.xml" if slide_no else None
+        if member and member in contents:
+            xml = contents[member].decode("utf-8")
+            patched = _write_footer_focus(xml, footer_value)
+            if patched != xml:
+                contents[member] = patched.encode("utf-8")
+                changed = True
+
     for member, stack in plan:
         if member not in contents:
             continue
@@ -1421,6 +1444,175 @@ def _misframes_a_research_figure(bullet: str, research: dict) -> Optional[str]:
             f"is stated as fact by research ({sources[0]!r}), not as a target")
 
 
+# ---------------------------------------------------------------------------
+# Slide-01 bullets are COMPOSED, not generated (run-30).
+#
+# Six rounds of guarding the model's prose failed the same way each time: each
+# guard caught one tense variant and the next generation invented another
+# ("targeting", then "eyeing"), because the failure is open-class. A blocklist
+# of verbs cannot enumerate the ways a sentence can misframe a fact.
+#
+# So slide 01's bullets no longer come from the model at all. They are
+# templated from the research blob's own structured fields, and every field
+# value is inserted VERBATIM -- there is no paraphrase step anywhere in this
+# path, which is what makes the "eyeing"/"targeting" drift class structurally
+# impossible rather than merely guarded against. The only text this module
+# authors is the fixed scaffolding ("Founded in ", "Operates in ", "Focus: ",
+# "Reported: "), and every one of those is a constant in this file.
+#
+# get_deck_content() is still called, because slide 12's fit paragraphs are
+# genuinely generative work. Its profile_bullets are discarded unread.
+#
+# The LLM-output guards above (headline restatement, deck self-description,
+# forward-looking substitution) still run afterward as defense in depth. On
+# composed bullets they are no-ops in practice, and they are kept rather than
+# deleted so that re-enabling model-authored bullets cannot silently ship
+# unguarded prose.
+_BULLET_FLOOR = 4
+
+# Gate verdict strings are INTERNAL. "QUALIFIED (est. $250M -- portfolio value
+# proxy ...)" is qualification bookkeeping, not something a prospect should
+# read, and CLAUDE.md's style rules ban the em dash the gate uses in it. An
+# icp_reason only becomes a bullet if it carries none of that.
+_ICP_REASON_UNSAFE_RE = re.compile(
+    r"(?:—|–"                                  # em/en dash: an AI tell per CLAUDE.md
+    r"|\bQUALIFIED\b|\bDISQUALIFIED\b|\bPARKED\b"        # internal verdict words
+    r"|\best\.|\bproxy\b|\bunverified\b|\bverify manually\b|\btertiary\b)",
+    re.IGNORECASE,
+)
+
+_SENTENCE_END = (".", "!", "?")
+
+
+def _is_sentence(text: str) -> bool:
+    """A full sentence needs both ends: an initial capital and terminal
+    punctuation. "Article noting $1 billion annual revenue (Business Observer,
+    Apr 2024)" has the capital but ends on a bracket -- a noun phrase, so it
+    gets the "Reported: " lead-in rather than being dropped into the slide as
+    if it were prose."""
+    stripped = (text or "").strip()
+    return bool(stripped) and stripped[0].isupper() and stripped.endswith(_SENTENCE_END)
+
+
+def _aum_basis_bullet(research: dict) -> str:
+    """"AUM basis: <figure>", from whichever field actually holds the figure
+    the stat tile shows.
+
+    NOTE this deviates from a literal "{aum_display} ({disclosed_label})":
+    icp_gate builds aum_display AS f"{disclosed_figure} ({disclosed_label})",
+    so that template double-prints the label ("$250 million (assets valued)
+    (assets valued)" on the live Choice NY row). aum_display verbatim is the
+    same information without the duplication."""
+    research = research or {}
+    display = str(research.get("aum_display") or "").strip()
+    if display:
+        return f"AUM basis: {display}"
+    figure = str(research.get("disclosed_figure") or "").strip()
+    if not figure:
+        return ""
+    label = str(research.get("disclosed_label") or "").strip()
+    return f"AUM basis: {figure} ({label})" if label else f"AUM basis: {figure}"
+
+
+def compose_profile_bullets(research: dict, category: str = "", subcategory: str = "",
+                           icp_reason: str = "") -> list:
+    """Slide-01 bullets templated from research, in the fixed order founding,
+    location, scale/figures, focus, domain.
+
+    Below _BULLET_FLOOR lines, grounded derivable lines are appended in the
+    scale/figures band -- the AUM basis, then the gate's own reason if it is
+    client-safe. Never generic filler: if the research carries nothing more,
+    the slide ships short (HARD RULE 5)."""
+    research = research or {}
+
+    def field(name: str) -> str:
+        return str(research.get(name) or "").strip()
+
+    bullets: list[str] = []
+    founded = field("founded_year")
+    if founded:
+        bullets.append(f"Founded in {founded}")
+
+    location = field("geography")
+    if location:
+        bullets.append(f"Operates in {location}")
+
+    event = field("recent_event")
+    if event and event.lower() != "none":
+        bullets.append(event if _is_sentence(event) else f"Reported: {event}")
+
+    focus = (subcategory or "").strip()
+    if focus:
+        bullets.append(f"Focus: {focus}")
+
+    domain = field("own_domain") or field("domain")
+    if domain:
+        bullets.append(domain)
+
+    if len(bullets) >= _BULLET_FLOOR:
+        return bullets
+
+    # Floor top-ups, inserted in the scale/figures band rather than appended
+    # after the domain, so the declared order still holds.
+    insert_at = len([b for b in bullets if b.startswith(("Founded in ", "Operates in "))])
+    extras = []
+    basis = _aum_basis_bullet(research)
+    if basis and basis not in bullets:
+        extras.append(basis)
+    reason = (icp_reason or "").strip()
+    if (reason and not _ICP_REASON_UNSAFE_RE.search(reason)
+            and len(bullets) + len(extras) < _BULLET_FLOOR):
+        extras.append(reason)
+    for offset, extra in enumerate(extras):
+        bullets.insert(insert_at + offset, extra)
+    return bullets
+
+
+# ---------------------------------------------------------------------------
+# Navy footer fallback. The bar's own label run is bold+italic and its value
+# run italic (master slide3.xml, Text 13) -- writing "Focus: " into the first
+# and the value into the second keeps the label/value styling the master
+# intended, instead of flattening both into one run.
+_FOOTER_SEPARATOR = " · "
+
+
+def footer_focus_text(capital_stack: str, category: str = "", subcategory: str = "") -> str:
+    """The footer's value text, or "" when the bar has nothing to say and
+    should be deleted. A populated capital_stack always wins -- this is a
+    fallback, not a replacement."""
+    if str(capital_stack or "").strip():
+        return ""
+    parts = [p for p in ((category or "").strip(), (subcategory or "").strip()) if p]
+    return _FOOTER_SEPARATOR.join(parts)
+
+
+def _xml_escape(text: str) -> str:
+    return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _write_footer_focus(xml: str, value: str) -> str:
+    """Slide-3 XML with the footer's label run set to "Focus: " and its value
+    run to `value`. Returns `xml` unchanged unless the shape is found with
+    exactly its expected two runs -- same "don't guess" posture as the shape
+    pass below."""
+    shape = None
+    for match in _SHAPE_RE.finditer(xml):
+        block = match.group(0)
+        name = _SHAPE_NAME_RE.search(block)
+        if name and name.group(1) == "Text 13":
+            if shape is not None:
+                return xml                      # ambiguous, leave it alone
+            shape = block
+    if shape is None or xml.count(shape) != 1:
+        return xml
+    runs = re.findall(r"<a:t>.*?</a:t>", shape, re.DOTALL)
+    if len(runs) != 2:
+        return xml
+    patched = shape.replace(runs[0], "<a:t>Focus: </a:t>", 1)
+    patched = patched.replace(runs[1], f"<a:t>{_xml_escape(value)}</a:t>", 1)
+    return xml.replace(shape, patched, 1)
+
+
 def _drop_bad_profile_bullets(bullets: list, oneliner: str,
                              research: Optional[dict] = None) -> tuple[list, list]:
     """(kept bullets, [(dropped bullet, reason), ...])."""
@@ -1441,22 +1633,29 @@ def _drop_bad_profile_bullets(bullets: list, oneliner: str,
     return kept, dropped
 
 
-def _generate_deck(firm_name: str, research: dict, progress: Progress) -> Optional[str]:
+def _generate_deck(firm_name: str, research: dict, progress: Progress,
+                   category: str = "", subcategory: str = "",
+                   icp_reason: str = "") -> Optional[str]:
     """Path to the generated deck PDF, or None if generation/conversion
     failed or produced no PDF. Workflow D has no personalization-hooks
     phase of its own (see firm_short's docstring) -- personalization is
     passed empty, matching deck_filler's own default for a caller with
-    nothing to add there."""
+    nothing to add there.
+
+    Slide 01's bullets are composed from research here and REPLACE whatever
+    get_deck_content() returned for them (see compose_profile_bullets). That
+    call still happens, for slide 12's fit paragraphs; its profile_bullets are
+    discarded unread."""
     try:
         deck_content = deck_filler.get_deck_content(firm_name, research, personalization={})
         deck_content["tokens_used"] = gate_config.MAX_LLM_TOKENS_PER_FIRM
+        composed = compose_profile_bullets(research, category, subcategory, icp_reason)
         oneliner = str((research or {}).get("firm_oneliner") or "").strip()
-        if deck_content.get("profile_bullets"):
-            kept, dropped = _drop_bad_profile_bullets(
-                deck_content["profile_bullets"], oneliner, research)
-            for bullet, reason in dropped:
-                progress(f"{firm_name}: profile bullet dropped ({reason}): {bullet!r}")
-            deck_content["profile_bullets"] = kept
+        kept, dropped = _drop_bad_profile_bullets(composed, oneliner, research)
+        for bullet, reason in dropped:
+            progress(f"{firm_name}: profile bullet dropped ({reason}): {bullet!r}")
+        deck_content["profile_bullets"] = kept
+        progress(f"{firm_name}: slide 01 composed {len(kept)} bullet(s) from research fields.")
         result = deck_filler.build_and_convert(firm_name, research, deck_content,
                                                progress=progress, personalization={})
     except Exception as e:  # noqa: BLE001 - a deck failure must never block a draft
@@ -1467,7 +1666,7 @@ def _generate_deck(firm_name: str, research: dict, progress: Progress) -> Option
     try:
         pptx_path = result.get("pptx_path")
         fill_data = result.get("fill_data") or {}
-        if pptx_path and _delete_empty_deck_shapes(pptx_path, fill_data):
+        if pptx_path and _delete_empty_deck_shapes(pptx_path, fill_data, category, subcategory):
             pdf_path = deck_filler.convert_to_pdf(pptx_path, progress=progress) or pdf_path
     except Exception as e:  # noqa: BLE001 - a shape-cleanup failure ships the un-cleaned deck, not none
         progress(f"{firm_name}: empty-shape cleanup failed ({e}); shipping the deck as generated.")
@@ -1551,7 +1750,10 @@ def _draft_one_firm(firm: dict, contacted_this_run: set[str], progress: Progress
     # the Gmail attachment, and the wd_drafts row, so they cannot drift
     # apart from each other. None (generation failed, or produced no PDF)
     # means exactly what it always meant: draft without a deck.
-    deck_pdf_path = _generate_deck(firm_name, research, progress)
+    deck_pdf_path = _generate_deck(
+        firm_name, research, progress,
+        category=firm.get("category") or "", subcategory=firm.get("subcategory") or "",
+        icp_reason=firm.get("icp_reason") or "")
     poc_first_name = poc_name.split()[0] if poc_name else "there"
     email_content = draft_email(
         firm_name=firm_name, poc_first_name=poc_first_name, poc_email=email,
