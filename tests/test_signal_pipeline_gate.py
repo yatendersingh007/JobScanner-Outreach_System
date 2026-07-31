@@ -1,24 +1,29 @@
-"""Run 27 follow-up: gate_group()'s geo TLD backstop.
+"""gate_group()'s two Workflow-D-local overrides of an otherwise-QUALIFIED
+gate verdict: the geo TLD backstop (run 27) and the acquired-by-parent park
+(run-29 funnel audit).
 
-Wires lib_snapshot.config.NORTH_AMERICA -- defined there, never referenced
-anywhere else in the codebase before this -- into a Workflow-D-local check
-on the gate's own resolved domain (research["domain"]/["own_domain"]).
+The geo backstop wires lib_snapshot.config.NORTH_AMERICA -- defined there,
+never referenced anywhere else in the codebase before this -- into a check on
+the gate's own resolved domain (research["domain"]/["own_domain"]).
 
-This is NOT the domain-mismatch cross-check that was asked for alongside
-it (comparing the gate's resolved domain against the posting's own
-employer domain). That check is not buildable today: a three-way
-investigation (scanner connectors, the gating pipeline, and the
-wd_postings/wd_firms schema) found no independently-derived employer
-domain anywhere in Workflow D's own code -- see BUILD_LOG.md's run-27
-follow-up entry for the full finding, including the correction of this
-file's own prior (wrong) claim that Workflow D "already knows the
-posting's employer domain from the scanner."
+Neither of these is a cross-check against the POSTING's own employer domain.
+That one is still not buildable: a three-way investigation (scanner
+connectors, the gating pipeline, and the wd_postings/wd_firms schema) found
+no independently-derived employer domain anywhere in Workflow D's own code --
+see BUILD_LOG.md's run-27 follow-up entry, including the correction of this
+file's own prior (wrong) claim that Workflow D "already knows the posting's
+employer domain from the scanner." What the run-29 audit DID find is a
+second domain that has always been available and was never compared: the
+POC's own email domain. That check lives in signal_drafting.py and is tested
+in test_signal_drafting.py, because it happens at drafting time, after
+Apollo, not at gate time.
 
-What IS tested here: foreign_domain_park_reason() in isolation (the pure
-TLD-classification logic), and gate_group()'s wiring of it (only overrides
-an otherwise-QUALIFIED verdict; a disqualified or already-parked verdict
-is left alone; the override uses a distinct park_source so it's
-distinguishable from the gate's own park reasons).
+What IS tested here: foreign_domain_park_reason() and
+acquired_by_parent_park_reason() in isolation (pure classification logic),
+and gate_group()'s wiring of both -- each only overrides an otherwise-
+QUALIFIED verdict, a disqualified or already-parked verdict is left alone,
+each uses a distinct park_source so it stays distinguishable from the gate's
+own park reasons, and the two never stack into a doubly-overwritten reason.
 
 No live Postgres, no network: wd_dbc and lib_referral.icp_gate.
 research_and_gate are monkeypatched directly.
@@ -196,10 +201,12 @@ def test_gate_group_does_not_override_an_already_parked_verdict(monkeypatch):
     assert row["park_reason"] == "aum_unverified"
 
 
-def test_gate_group_alphax_regression_still_qualifies_since_gate_resolved_a_dot_com(monkeypatch):
+def test_gate_group_alphax_regression_is_not_caught_by_the_geo_tld_backstop(monkeypatch):
     """The exact run-27 AlphaX case: the gate resolved to alphax-capital.com
     (a wrongly-matched different company, but a .com, no foreign TLD) --
-    this backstop, by design, does not catch it. Documented, not silently
+    this backstop, by design, does not catch it. What DOES catch it is the
+    POC email domain cross-check in signal_drafting.py (the contact was at
+    alphax.ae) -- see test_signal_drafting.py. Documented here, not silently
     assumed fixed."""
     _fake_dbc(monkeypatch)
     monkeypatch.setattr(
@@ -213,3 +220,162 @@ def test_gate_group_alphax_regression_still_qualifies_since_gate_resolved_a_dot_
     row = sp.gate_group(run_id=1, group=_group(), progress=lambda m: None)
 
     assert row["icp_status"] == "qualified"
+
+
+# ---------------------------------------------------------------------------
+# acquired_by_parent_park_reason: direction is the whole difficulty
+#
+# Run-27 funnel audit: Choice NY gated QUALIFIED while the gate's own
+# research blob read "Sold to Associa Corp. in 2021 (earn-out noted)".
+# Associa is the largest community-management operator in North America and
+# has its own back office. Nothing read that field.
+#
+# The two acquirer strings below are REAL rows out of wd_firms, not invented
+# counterexamples: a naive /acquired/ match parks both, and both mean the
+# opposite thing (a firm buying real estate is growing and running its own
+# books).
+# ---------------------------------------------------------------------------
+_ACQUIRED_TARGET_EVENTS = [
+    "Sold to Associa Corp. in 2021 (earn-out noted)",          # live, wd_firms id 65/66
+    "sold to Associa Corp. in 2021 (earn-out mentioned)",      # live, wd_firms id 83 (lowercase)
+    "Acquired by Bain Capital for $5.3B (Dec 14, 2023)",       # live, Guidehouse
+    "Bought by a larger operator in 2019",
+    "Purchased by Greystar in March 2024",
+    "Taken private by a PE sponsor last year",
+    "Merged into its parent company in 2022",
+    "Merged to form a combined platform (2023)",
+    "Now a wholly-owned subsidiary of Associa",
+    "A subsidiary of Brookfield Asset Management",
+]
+
+_ACQUIRER_EVENTS = [
+    # Both live rows in wd_firms. Neither firm was acquired.
+    "Acquired properties for $416.8M in 2025 (12 months ended Dec 31, 2025)",   # Brixmor, id 73
+    "acquired The Morin Company, Morin Distribution, and Prillaman Systems",    # Havtech, id 17
+    "Acquired a 12-property portfolio in Texas",
+    "Completed the acquisition of a regional manager",
+    "Announced the acquisition of two shopping centers",
+    "Acquiring its third industrial park this year",
+]
+
+
+@pytest.mark.parametrize("event", _ACQUIRED_TARGET_EVENTS)
+def test_acquired_by_parent_fires_when_the_firm_itself_was_acquired(event):
+    reason = sp.acquired_by_parent_park_reason({"recent_event": event})
+    assert reason is not None
+    assert event in reason          # the event is quoted verbatim, never paraphrased
+
+
+@pytest.mark.parametrize("event", _ACQUIRER_EVENTS)
+def test_acquired_by_parent_never_fires_when_the_firm_is_the_acquirer(event):
+    """The Brixmor/Havtech regression. A firm doing the acquiring is the
+    OPPOSITE signal and must not be parked."""
+    assert sp.acquired_by_parent_park_reason({"recent_event": event}) is None
+
+
+@pytest.mark.parametrize("research", [
+    {}, None, {"recent_event": ""}, {"recent_event": "   "},
+    {"recent_event": None}, {"recent_event": "None"},
+])
+def test_acquired_by_parent_handles_a_missing_recent_event(research):
+    assert sp.acquired_by_parent_park_reason(research) is None
+
+
+@pytest.mark.parametrize("event", [
+    "Opened new global HQ at 270 Park Avenue (Oct 21, 2025)",
+    "launched $50M venture fund (2022)",
+    "Article noting $1 billion annual revenue (Business Observer, Apr 2024)",
+    "Project entered construction under SB 684 in Campbell",
+    "achieved CMMI Institute Level 3 (public appraisal) - 2023",
+    "Raptor Digital seeking $200M fund (reported 2024-2025 period)",
+])
+def test_acquired_by_parent_ignores_unrelated_events(event):
+    """Every one of these is a real recent_event out of wd_firms."""
+    assert sp.acquired_by_parent_park_reason({"recent_event": event}) is None
+
+
+def test_gate_group_parks_a_qualified_firm_that_was_acquired(monkeypatch):
+    """The Choice NY regression, end to end through the gate wiring."""
+    updates = _fake_dbc(monkeypatch)
+    research = {"domain": "choicenewyork.com",
+                "recent_event": "Sold to Associa Corp. in 2021 (earn-out noted)"}
+    monkeypatch.setattr(
+        icp_gate, "research_and_gate",
+        lambda firm_name, progress: icp_gate.GateResult(
+            icp_result="qualified",
+            icp_reason="QUALIFIED (est. $250M - portfolio value proxy)",
+            research=research,
+        ),
+    )
+    progressed = []
+
+    row = sp.gate_group(run_id=1, group=_group("Choice NY Property Management LLC"),
+                        progress=progressed.append)
+
+    assert row["icp_status"] == "parked"
+    assert row["park_source"] == "acquired_by_parent"
+    assert "Associa" in row["park_reason"]
+    assert "Associa" in row["icp_reason"]
+    assert any("Associa" in msg and "qualifying" in msg for msg in progressed)
+    assert updates[-1]["research"] == research     # research persisted unmodified
+
+
+def test_gate_group_does_not_park_a_qualified_firm_that_did_the_acquiring(monkeypatch):
+    """Brixmor's real research blob. It parked in run 27 for an unrelated
+    reason (a $0M square-footage proxy); nothing about "Acquired properties"
+    may park it here."""
+    _fake_dbc(monkeypatch)
+    monkeypatch.setattr(
+        icp_gate, "research_and_gate",
+        lambda firm_name, progress: icp_gate.GateResult(
+            icp_result="qualified", icp_reason="QUALIFIED",
+            research={"domain": "brixmor.com",
+                     "recent_event": "Acquired properties for $416.8M in 2025"},
+        ),
+    )
+
+    row = sp.gate_group(run_id=1, group=_group("Brixmor Property Group"), progress=lambda m: None)
+
+    assert row["icp_status"] == "qualified"
+    assert row["park_source"] is None
+
+
+@pytest.mark.parametrize("verdict", ["disqualified", "parked"])
+def test_gate_group_acquired_check_does_not_override_a_non_qualified_verdict(verdict, monkeypatch):
+    _fake_dbc(monkeypatch)
+    monkeypatch.setattr(
+        icp_gate, "research_and_gate",
+        lambda firm_name, progress: icp_gate.GateResult(
+            icp_result=verdict, icp_reason="the gate's own reason",
+            park_reason="the gate's own park reason" if verdict == "parked" else None,
+            park_source="research" if verdict == "parked" else None,
+            research={"recent_event": "Sold to Associa Corp. in 2021"},
+        ),
+    )
+
+    row = sp.gate_group(run_id=1, group=_group(), progress=lambda m: None)
+
+    assert row["icp_status"] == verdict
+    assert row["icp_reason"] == "the gate's own reason"
+    assert row["park_source"] != "acquired_by_parent"
+
+
+def test_gate_group_geo_tld_check_wins_when_both_would_park(monkeypatch):
+    """A firm with BOTH a foreign domain and an acquisition event parks once,
+    attributed to the geo check, which runs first. The two must not stack
+    into a doubly-overwritten reason."""
+    _fake_dbc(monkeypatch)
+    monkeypatch.setattr(
+        icp_gate, "research_and_gate",
+        lambda firm_name, progress: icp_gate.GateResult(
+            icp_result="qualified", icp_reason="qualifies",
+            research={"domain": "firm.ae",
+                     "recent_event": "Acquired by a larger operator in 2021"},
+        ),
+    )
+
+    row = sp.gate_group(run_id=1, group=_group(), progress=lambda m: None)
+
+    assert row["icp_status"] == "parked"
+    assert row["park_source"] == "geo_tld_check"
+    assert "United Arab Emirates" in row["park_reason"]

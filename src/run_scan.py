@@ -45,6 +45,7 @@ def _run_drafting(result, progress) -> None:
     result.drafted_with_prior_contact = draft_result.drafted_with_prior_contact
     result.no_email = draft_result.no_email
     result.duplicate_within_run = draft_result.duplicate_within_run
+    result.poc_domain_mismatch = draft_result.poc_domain_mismatch
     result.fallback_counts = draft_result.fallback_counts
     if draft_result.cancelled:
         result.cancelled = True
@@ -131,6 +132,10 @@ def summarize(r, dry_hint: str = "--dry") -> str:
         if r.duplicate_within_run:
             lines += [f"DUPLICATE WITHIN RUN, blocked {len(r.duplicate_within_run)}"]
             lines += [f"  {f['firm_name']}" for f in r.duplicate_within_run]
+        if r.poc_domain_mismatch:
+            lines += [f"POC DOMAIN MISMATCH, not drafted {len(r.poc_domain_mismatch)}"]
+            lines += [f"  {f['firm_name']}: {f.get('poc_domain_mismatch_reason', 'domain mismatch')}"
+                      for f in r.poc_domain_mismatch]
         if r.fallback_counts:
             lines += ["", "Fallback telemetry (HARD RULE 4): " +
                       ", ".join(f"{reason}={count}" for reason, count in sorted(r.fallback_counts.items()))]

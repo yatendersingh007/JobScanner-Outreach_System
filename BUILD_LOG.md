@@ -2070,3 +2070,135 @@ slide-12 stack separation for the colliding "Shape 12"/"Text 13"/"Text 5"
 names). 0 failures. No vendored `.py` file touched, and no template file
 touched. No scan command run.
 
+
+## Three funnel-audit fixes: blocklist, POC domain cross-check, acquired-by park - 2026-08-08
+
+Acting on the run-25/27 funnel audit. One config change and two Workflow D
+code changes. No vendored `.py` file touched.
+
+### 1. Blocklist extended: 31 -> 52 entries (config)
+
+The audit found 6 recruiters and professional-services firms that passed the
+blocklist, reached the gate, and were each disqualified on firm type after
+spending 6 Tavily searches: Henderson Harbor Group (its own research
+one-liner reads "talent placement for accounting, finance, tax & technology"),
+CPA Connections, Klausner & Company PC, Susan Fitzgerald & Associates, LG
+Legacy Group, Guidehouse. Added those plus name-shape and named-recruiter
+entries.
+
+**Measured before finalizing**, against all 248 company names in
+`output/jobs.csv` + `output/jobs_2026-07-31_0421.csv` and all 83 `wd_firms`
+rows, using `signal_pipeline._is_staffing` itself (lowercased substring
+containment) rather than a re-implementation:
+
+- **Zero qualified firms blocked. Zero parked firms blocked** by the new
+  entries. All 6 firms the new entries newly match are `disqualified`.
+- Run 27: 6 of 16 firms blocked, gate calls 9 -> 5, **24 of 54 Tavily
+  searches saved (44%)**.
+- The 3 parked firms the FULL list blocks (Jobot, Metasys Technologies,
+  Syntax Talent Solutions) are caught by PRE-EXISTING tokens (`jobot`,
+  `metasys`, `talent`), not by anything added here. Today's behavior,
+  unchanged.
+
+**One requested entry was narrowed. `Bachrach` -> `Bachrach Group`.** A bare
+surname is the highest-risk shape on this list: family offices are an explicit
+ICP category and are routinely named after the family, so "Bachrach" would
+block a hypothetical "Bachrach Family Office" or "Bachrach Properties".
+Verified the narrowed token still catches the actual offender, "TBG | The
+Bachrach Group". Same reasoning already applied to the given full names
+`CPA Connections` (not bare "CPA") and `Susan Fitzgerald & Associates` (not
+bare "& Associates").
+
+Two entries are redundant and kept only for readability: `Recruiting` is a
+strict superset match of the existing `Recruit` (all 6 names it matches were
+already blocked), and `Orion Placement` is covered by `Placement`.
+
+Remaining false-positive risk, in order: `Placement` (a real capital-raising
+firm could carry it — "private placement" is a finance term, not only a
+recruiting one), then `Quest Financial` and `Search Advisors` (specific
+enough that a collision is unlikely). Everything else is a distinct company
+name.
+
+### 2. POC email domain cross-check (Workflow D code)
+
+Run 27 drafted to `riqbal@alphax.ae` for a firm the gate resolved as
+`alphax-capital.com`. `_draft_one_firm` now compares the two before spending
+anything, via `poc_domain_mismatch_reason()`. A block returns a new
+`poc_domain_mismatch` bucket, carried on `DraftBatchResult` and `RunResult`
+and printed in the run summary. Comparison uses `wd_poc._firm_matches` as
+asked, never new comparison logic.
+
+**Country is tested before the label, and that ordering is what makes the
+check work at all.** Verified against the live `wd_drafts` rows:
+`_firm_matches("alphax", "alphax capital")` is **True**, because "capital" is
+in `_TOLERABLE_EXTRAS`. That is correct behavior for firm names, and on a
+label-first ordering it would have downgraded the real AlphaX incident to a
+warning and drafted to the UAE contact anyway. So the POC domain runs through
+`signal_pipeline.foreign_domain_park_reason` first — the same ccTLD table,
+imported, never a second copy to drift — and a non-North-American ccTLD
+blocks regardless of how well the labels match. `.ca` is North American and
+does not block, which is exactly the regional-affiliate case the warning path
+exists for.
+
+Affiliate case is a warning, not a block: a sibling domain whose core still
+reads as the same firm (`acme-capital.com` vs `acme.com`) logs and drafts.
+Public mailboxes (gmail, outlook, ...) are ignored entirely — a real principal
+at a small firm legitimately uses one, that is a personal-address question
+rather than a wrong-company one, and blocking on it would cost real drafts for
+no evidence.
+
+Against the three real run-27 drafts: Choice NY PASS, Neal PASS, **AlphaX
+BLOCK**.
+
+**Bug caught by testing, in the fix itself:** `_email_domain` used
+`rpartition("@")`, which returns the whole string when there is no "@" — so a
+malformed address became a bogus domain and produced a spurious block. It now
+returns "" when there is no "@".
+
+**Bug caught by testing, in the tests:** the first `_draft_one_firm` wiring
+helper put `poc_name_hint` on the firm dict, but `_draft_one_firm` reads it
+off the POSTING rows. That left `poc_name` None, skipped the patched
+`apollo_enrich.find_email`, and fell through to the UNPATCHED
+`wd_poc.find_senior_poc` — the live Apollo API — which is why the two wiring
+tests initially returned each other's expected bucket. The helper now puts the
+hint on the postings and asserts `find_senior_poc` is never reached.
+
+### 3. Direction-aware acquired-by park (Workflow D code)
+
+`acquired_by_parent_park_reason()` sits next to `foreign_domain_park_reason`
+and parks an otherwise-qualified firm whose `recent_event` says the firm
+itself was acquired. Choice NY's blob has carried "Sold to Associa Corp. in
+2021 (earn-out noted)" the whole time and nothing read it.
+
+**Direction is the whole difficulty.** Two real `wd_firms` rows would
+false-positive on a naive `/acquired/` match, and both mean the opposite
+thing (a firm buying real estate is growing and running its own books):
+
+- Brixmor Property Group: "Acquired properties for $416.8M in 2025"
+- Havtech: "acquired The Morin Company, Morin Distribution, and Prillaman
+  Systems"
+
+So an explicit acquirer test runs FIRST and short-circuits, and the target
+patterns are anchored on phrasings where the firm is the grammatical object
+("sold to", "acquired BY", "subsidiary of"). Both directions are tested,
+using those two strings verbatim as the negative cases.
+
+Fires on 9 of 83 rows (2 distinct firms: Choice NY, Guidehouse). Deliberately
+narrow — the value is precision on a verdict that would otherwise ship a wrong
+draft, not coverage. An acquisition this misses is a firm the gate qualifies
+exactly as it does today, which is current behavior, not a regression. The geo
+check runs first, so a firm with both a foreign domain and an acquisition
+parks once, attributed to geo, rather than double-overwriting its reason.
+
+### Verification
+
+575 tests pass, up from 501. No vendored `.py` file touched. No scan command
+run — verified via `pytest`, direct function calls against the live `wd_firms`
+/ `wd_drafts` rows, and the two run CSVs.
+
+`scanner/config.yaml` also carries uncommitted operator edits in the working
+tree (tinyfish enabled, Canada targets commented out, a JSearch query swap).
+Only the blocklist hunk is in this commit: the staged blob was built as HEAD
+plus the blocklist change, so those operator edits remain unstaged and
+untouched. Both the staged and working-tree versions parse as valid YAML.
+

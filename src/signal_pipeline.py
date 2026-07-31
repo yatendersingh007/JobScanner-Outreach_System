@@ -118,6 +118,8 @@ class RunResult:
     drafted_with_prior_contact: list = field(default_factory=list)
     no_email: list = field(default_factory=list)
     duplicate_within_run: list = field(default_factory=list)
+    # Contact resolved to a domain that is not the firm the gate researched.
+    poc_domain_mismatch: list = field(default_factory=list)
     # HARD RULE 4: per-run aggregate fact-grounding/fallback counts, reset at
     # the start of every draft_for_run() call and reported here.
     fallback_counts: dict = field(default_factory=dict)
@@ -336,6 +338,75 @@ def foreign_domain_park_reason(research: dict) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Acquired-by-a-larger-operator park (run-27 funnel audit).
+#
+# Choice NY Property Management gated QUALIFIED while the gate's OWN research
+# blob said recent_event = "Sold to Associa Corp. in 2021 (earn-out noted)".
+# Associa is the largest community-management operator in North America and
+# has its own back office, so the capacity gap the job posting signals is not
+# Choice NY's to fill by hiring us. Nothing read that field. This reads it.
+#
+# DIRECTION IS THE WHOLE DIFFICULTY. Across all 83 wd_firms rows the audit
+# found 45 with a non-empty recent_event, of which 11 mention an acquisition
+# -- and 2 of those 11 describe the firm as the ACQUIRER, not the target:
+#   Brixmor Property Group  "Acquired properties for $416.8M in 2025"
+#   Havtech                 "acquired The Morin Company, Morin Distribution,
+#                            and Prillaman Systems"
+# A firm buying real estate is the opposite signal: it is growing and running
+# its own books. A naive /acquired/ match parks both, so the patterns below
+# are anchored on phrasings where the firm is the grammatical OBJECT of the
+# acquisition ("sold to X", "acquired BY X", "subsidiary of X"), and an
+# explicit acquirer test runs FIRST and wins outright.
+#
+# Deliberately narrow. It fires on 2 distinct firms out of 83 rows; the value
+# is precision on a verdict that would otherwise ship a wrong draft, not
+# coverage. An acquisition this misses is a firm the gate qualifies exactly as
+# it does today, which is the current behavior, not a regression.
+# ---------------------------------------------------------------------------
+_ACQUIRED_TARGET_RE = re.compile(
+    r"\b(?:"
+    r"sold\s+(?:to|off\s+to)"
+    r"|acquired\s+by"
+    r"|bought\s+by"
+    r"|purchased\s+by"
+    r"|taken\s+private\s+by"
+    r"|merged\s+(?:in)?to"
+    r"|(?:a\s+|now\s+a\s+|wholly[\s-]owned\s+)?subsidiary\s+of"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Checked BEFORE _ACQUIRED_TARGET_RE and short-circuits it: the firm is doing
+# the acquiring. "acquired properties", "acquired <a company name>",
+# "completed the acquisition of", "acquired a portfolio".
+_ACQUIRER_RE = re.compile(
+    r"\b(?:"
+    r"acquir(?:ed|es|ing)\s+(?:properties|property|a\s|an\s|its\s|the\s|\d|[A-Z])"
+    r"|acquisition\s+of"
+    r"|completed\s+the\s+acquisition"
+    r")",
+)
+
+
+def acquired_by_parent_park_reason(research: dict) -> Optional[str]:
+    """None if recent_event gives no reason to think the firm itself was
+    acquired, else a park reason quoting the event verbatim.
+
+    Returns None when the firm is the ACQUIRER -- that test runs first and
+    wins, because "Acquired properties for $416.8M" also contains the word
+    "acquired" and means the opposite thing."""
+    event = str((research or {}).get("recent_event") or "").strip()
+    if not event or event.lower() == "none":
+        return None
+    if _ACQUIRER_RE.search(event):
+        return None
+    if not _ACQUIRED_TARGET_RE.search(event):
+        return None
+    return (f"recent_event indicates the firm itself was acquired ({event}); "
+            "a parent with its own back office may already cover this gap")
+
+
+# ---------------------------------------------------------------------------
 # Gate
 # ---------------------------------------------------------------------------
 def gate_group(run_id: int, group: FirmGroup, progress: Progress) -> dict:
@@ -381,6 +452,12 @@ def gate_group(run_id: int, group: FirmGroup, progress: Progress) -> dict:
             progress(f"{group.firm_name}: {geo_reason}. Parked despite the gate qualifying it.")
             icp_status, icp_reason = "parked", geo_reason
             park_reason, park_source = geo_reason, "geo_tld_check"
+    if icp_status == "qualified":
+        acquired_reason = acquired_by_parent_park_reason(res.research)
+        if acquired_reason:
+            progress(f"{group.firm_name}: {acquired_reason}. Parked despite the gate qualifying it.")
+            icp_status, icp_reason = "parked", acquired_reason
+            park_reason, park_source = acquired_reason, "acquired_by_parent"
 
     dbc.update_wd_firm(
         firm["id"],

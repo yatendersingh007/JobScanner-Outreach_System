@@ -1513,3 +1513,207 @@ def test_draft_for_run_resets_and_reports_fallback_counts(monkeypatch):
     result = sd.draft_for_run(run_id=1)
 
     assert "stale_from_a_previous_run" not in result.fallback_counts
+
+
+# ---------------------------------------------------------------------------
+# POC email domain cross-check (run-29 funnel audit).
+#
+# Run 27 drafted to riqbal@alphax.ae for a firm the gate had resolved as
+# alphax-capital.com. The geo TLD backstop in signal_pipeline.py cannot catch
+# this -- it checks the GATE's domain, which was a plain .com and passed. The
+# mismatch only exists between the gate's domain and the CONTACT's.
+#
+# The country test runs BEFORE the label test on purpose, and that ordering is
+# what makes this catch AlphaX at all: _firm_matches("alphax", "alphax
+# capital") is TRUE ("capital" is a _TOLERABLE_EXTRAS business descriptor),
+# which is correct for firm names and would have downgraded the real incident
+# to a warning. Verified against the live wd_drafts rows before the ordering
+# was chosen.
+# ---------------------------------------------------------------------------
+def test_poc_domain_alphax_regression_blocks():
+    """The exact run-27 rows: gate own_domain alphax-capital.com, Apollo
+    contact riqbal@alphax.ae."""
+    verdict = sd.poc_domain_mismatch_reason(
+        "riqbal@alphax.ae", {"own_domain": "alphax-capital.com"}, "AlphaX")
+
+    assert verdict is not None
+    severity, message = verdict
+    assert severity == "block"
+    assert "alphax.ae" in message and "alphax-capital.com" in message
+    assert "United Arab Emirates" in message
+
+
+def test_poc_domain_alphax_would_have_only_warned_on_the_label_alone():
+    """Documents WHY the country test runs first. The two labels genuinely
+    read as the same firm through _firm_matches, so label-only ordering would
+    have drafted to the UAE contact with a warning."""
+    assert sd.wd_poc._firm_matches("alphax", "alphax capital") is True
+
+
+@pytest.mark.parametrize("email,gate_domain", [
+    ("drew.donovan@choicenewyork.com", "choicenewyork.com"),   # live run-27 draft
+    ("pneal@nealcommunities.com", "nealcommunities.com"),      # live run-27 draft
+])
+def test_poc_domain_passes_the_two_run_27_drafts_that_were_correct(email, gate_domain):
+    """Both correct run-27 drafts must stay clean -- this check may not cost
+    a real draft."""
+    assert sd.poc_domain_mismatch_reason(email, {"own_domain": gate_domain}, "Firm") is None
+
+
+@pytest.mark.parametrize("email", [
+    "a@acme.com",             # identical
+    "a@mail.acme.com",        # subdomain, same registrable label
+    "a@ACME.COM",             # case
+    "a@acme.ca",              # Canadian regional domain: North American, allowed
+    "a@acme.us",
+])
+def test_poc_domain_no_question_raised(email):
+    assert sd.poc_domain_mismatch_reason(email, {"own_domain": "acme.com"}, "Acme") is None
+
+
+@pytest.mark.parametrize("email", [
+    "principal@gmail.com", "founder@outlook.com", "cfo@yahoo.com", "x@icloud.com",
+    "y@protonmail.com",
+])
+def test_poc_domain_ignores_public_mailboxes(email):
+    """A real principal at a small firm legitimately uses a personal mailbox.
+    That is a personal-address question, not a wrong-company one, and
+    blocking on it would cost real drafts for no evidence."""
+    assert sd.poc_domain_mismatch_reason(email, {"own_domain": "acme.com"}, "Acme") is None
+
+
+@pytest.mark.parametrize("research", [
+    {}, None, {"own_domain": ""}, {"domain": None}, {"own_domain": None, "domain": ""},
+])
+def test_poc_domain_needs_a_gate_domain_to_compare_against(research):
+    assert sd.poc_domain_mismatch_reason("a@anything.com", research, "Acme") is None
+
+
+@pytest.mark.parametrize("email", ["", None, "not-an-email", "  "])
+def test_poc_domain_handles_a_missing_or_malformed_email(email):
+    assert sd.poc_domain_mismatch_reason(email, {"own_domain": "acme.com"}, "Acme") is None
+
+
+def test_poc_domain_warns_on_a_plausible_affiliate_domain():
+    """A sibling domain whose core still reads as the same firm is a warning,
+    not a block -- real firms run a "<firm>-capital.com" for the investment
+    arm."""
+    verdict = sd.poc_domain_mismatch_reason(
+        "a@acme-capital.com", {"own_domain": "acme.com"}, "Acme")
+
+    assert verdict is not None
+    severity, message = verdict
+    assert severity == "warn"
+    assert "drafted anyway" in message
+
+
+def test_poc_domain_blocks_an_unrelated_domain():
+    verdict = sd.poc_domain_mismatch_reason(
+        "a@totallyunrelated.com", {"own_domain": "acme.com"}, "Acme")
+
+    assert verdict is not None
+    assert verdict[0] == "block"
+
+
+@pytest.mark.parametrize("email", ["a@acme.co.uk", "a@acme.in", "a@acme.sg", "a@acme.de"])
+def test_poc_domain_blocks_a_foreign_domain_even_when_the_label_matches(email):
+    """The AlphaX lesson generalized: a label matching perfectly does not make
+    a contact in another country an affiliate."""
+    verdict = sd.poc_domain_mismatch_reason(email, {"own_domain": "acme.com"}, "Acme")
+
+    assert verdict is not None
+    assert verdict[0] == "block"
+
+
+def test_poc_domain_falls_back_to_domain_when_own_domain_is_absent():
+    assert sd.poc_domain_mismatch_reason(
+        "a@acme.com", {"domain": "acme.com"}, "Acme") is None
+    assert sd.poc_domain_mismatch_reason(
+        "a@other.com", {"domain": "acme.com"}, "Acme")[0] == "block"
+
+
+@pytest.mark.parametrize("domain,expected", [
+    ("acme.com", "acme"),
+    ("www.acme.com", "acme"),
+    ("ir.sonicautomotive.com", "sonicautomotive"),
+    ("alphax-capital.com", "alphax capital"),
+    ("acme.co.uk", "acme"),
+    ("acme.com.au", "acme"),
+    ("acme", "acme"),
+    ("", ""),
+])
+def test_domain_core_reduces_to_the_registrable_label(domain, expected):
+    assert sd._domain_core(domain) == expected
+
+
+# ---------------------------------------------------------------------------
+# _draft_one_firm wiring: a block must stop the draft BEFORE any deck or LLM
+# spend, and must surface as its own bucket.
+# ---------------------------------------------------------------------------
+def _wire_poc(monkeypatch, email, research, deck_calls, draft_calls):
+    # poc_name comes off the POSTING rows, not the firm dict -- an earlier
+    # version of this helper put the hint on the firm, which left poc_name
+    # None and fell through to the UNPATCHED wd_poc.find_senior_poc, i.e. the
+    # live Apollo API (see the warning on the older POC tests above).
+    monkeypatch.setattr(sd.dbc, "postings_for_firm",
+                        lambda firm_id: [{"title": "Controller", "url": "https://x.example/1",
+                                         "poc_name_hint": "Rao Iqbal",
+                                         "poc_designation_hint": "CFO"}])
+    monkeypatch.setattr(sd.apollo_enrich, "find_email", lambda **kw: (email, "verified"))
+    monkeypatch.setattr(sd.wd_poc, "find_senior_poc",
+                        lambda *a, **kw: pytest.fail("find_senior_poc must not be reached"))
+    monkeypatch.setattr(sd.dbc, "find_prior_contact", lambda **kw: None)
+
+    def fake_generate_deck(*a, **kw):
+        deck_calls.append(a)
+        return None
+
+    def fake_draft_email(**kw):
+        draft_calls.append(kw)
+        return {"subject": "s", "body": "b", "word_count": 1,
+                "thin_personalization": False, "fallback_stage": None,
+                "fallback_reason": None}
+
+    monkeypatch.setattr(sd, "_generate_deck", fake_generate_deck)
+    monkeypatch.setattr(sd, "draft_email", fake_draft_email)
+    return {"id": 1, "firm_name": "AlphaX", "research": research}
+
+
+def test_draft_one_firm_blocks_on_a_poc_domain_mismatch(monkeypatch):
+    deck_calls, draft_calls = [], []
+    firm = _wire_poc(monkeypatch, "riqbal@alphax.ae",
+                     {"own_domain": "alphax-capital.com"}, deck_calls, draft_calls)
+    progressed = []
+
+    bucket, row = sd._draft_one_firm(firm, set(), progressed.append)
+
+    assert bucket == "poc_domain_mismatch"
+    assert "alphax.ae" in row["poc_domain_mismatch_reason"]
+    assert row["poc_email"] == "riqbal@alphax.ae"
+    assert any("alphax.ae" in msg for msg in progressed)
+    # nothing was spent: no deck generated, no email drafted
+    assert deck_calls == [] and draft_calls == []
+
+
+def test_draft_one_firm_proceeds_through_an_affiliate_warning(monkeypatch):
+    """A warning logs and drafts. It must NOT land in the mismatch bucket."""
+    deck_calls, draft_calls = [], []
+    firm = _wire_poc(monkeypatch, "a@acme-capital.com", {"own_domain": "acme.com"},
+                     deck_calls, draft_calls)
+    monkeypatch.setattr(sd.dbc, "create_wd_draft", lambda firm_id, **f: {"id": 9, **f})
+    monkeypatch.setattr(sd.dbc, "record_contacted", lambda **kw: None)
+    monkeypatch.setattr(sd.gmail_client, "create_draft",
+                        lambda to, subject, body, attach_path=None, progress=None:
+                        {"draft_id": f"DRAFT-{to}", "attached": False})
+    progressed = []
+
+    bucket, _ = sd._draft_one_firm(firm, set(), progressed.append)
+
+    assert bucket == "drafted"
+    assert any("drafted anyway" in msg for msg in progressed)
+    assert draft_calls, "the email must still be drafted on a warning"
+
+
+def test_draft_batch_result_has_a_poc_domain_mismatch_bucket():
+    assert sd.DraftBatchResult().poc_domain_mismatch == []
+

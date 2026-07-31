@@ -21,6 +21,7 @@ from typing import Callable, NamedTuple, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 from lib_referral import apollo_enrich, config as gate_config, deck_filler, fact_check, gmail_client, testmode
+from . import signal_pipeline
 from . import wd_config as config
 from . import wd_dbc as dbc
 from . import wd_poc
@@ -840,8 +841,127 @@ class DraftBatchResult:
     drafted_with_prior_contact: list = field(default_factory=list)
     no_email: list = field(default_factory=list)
     duplicate_within_run: list = field(default_factory=list)
+    poc_domain_mismatch: list = field(default_factory=list)
     cancelled: bool = False
     fallback_counts: dict = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# POC email domain cross-check (run-27 funnel audit).
+#
+# Run 27 drafted to riqbal@alphax.ae for a firm the gate had resolved as
+# alphax-capital.com -- a Silicon Valley builder-developer. "AlphaX" is a
+# generic enough name that Apollo matched a different, UAE-based entity
+# entirely, and nothing compared the two. The geo-TLD backstop in
+# signal_pipeline.py cannot catch this: it checks the GATE's domain, which was
+# a plain .com and passed. The mismatch only exists between the gate's domain
+# and the CONTACT's, so that is where it has to be checked.
+#
+# Uses wd_poc._firm_matches rather than new comparison logic. That function
+# already carries the FIX 28 protection (containment, not equality, with only
+# _TOLERABLE_EXTRAS business-descriptor words allowed as extras) and the
+# abbreviation expansion that makes "NY" and "New York" comparable -- and it
+# is already the function trusted to decide whether an Apollo org name is the
+# firm we researched. Comparing the two domains' core labels is the same
+# question asked of a different string, so it gets the same answer function.
+#
+# The affiliate case is a WARNING, not a block: real firms genuinely operate
+# on a sibling domain (a "<firm>-capital.com" for the investment arm, a
+# regional "<firm>.ca"). If the two domains' core labels still read as the
+# same firm, the draft proceeds with a logged warning.
+#
+# COUNTRY IS CHECKED BEFORE THE LABEL, and this is what makes the check catch
+# the incident it was written for. Verified against the real run-27 draft
+# rows: _firm_matches("alphax", "alphax capital") is TRUE, because "capital"
+# is in _TOLERABLE_EXTRAS -- correct behavior for firm names, and it would
+# have downgraded AlphaX to a mere warning and drafted to the UAE contact
+# anyway. But alphax.ae carries a UAE ccTLD, and a contact in another country
+# is not a sibling domain of a Silicon Valley firm; it is a different entity.
+# So the POC domain runs through signal_pipeline's OWN ccTLD table first (the
+# same table, imported, never a second copy to drift), and a non-North-
+# American ccTLD blocks outright regardless of how well the labels match.
+# ".ca" is North American and so does NOT block -- that is exactly the
+# regional-domain case the warning path exists for.
+# ---------------------------------------------------------------------------
+_PUBLIC_EMAIL_DOMAINS = frozenset({
+    "gmail.com", "googlemail.com", "yahoo.com", "hotmail.com", "outlook.com",
+    "live.com", "msn.com", "aol.com", "icloud.com", "me.com", "mac.com",
+    "protonmail.com", "proton.me", "gmx.com", "zoho.com", "yandex.com",
+})
+
+
+def _email_domain(email: str) -> str:
+    """The part after the last "@", or "" when there isn't one. A string with
+    no "@" has no domain to compare -- treating the whole string as one (an
+    earlier version did) turned a malformed address into a bogus mismatch."""
+    text = (email or "").strip().lower()
+    if "@" not in text:
+        return ""
+    _, _, domain = text.rpartition("@")
+    return domain.strip().strip(".")
+
+
+def _domain_core(domain: str) -> str:
+    """The registrable label of a domain, as a firm-name-shaped string.
+
+    "www.alphax-capital.com" -> "alphax capital"; "ir.sonicautomotive.com" ->
+    "sonicautomotive". Hyphens and dots become spaces so _firm_matches sees
+    tokens rather than one fused label. The TLD and any leading host labels
+    are dropped -- a firm on mail.example.com and one on example.com are the
+    same firm, and the geo-TLD check already owns the country question."""
+    domain = (domain or "").strip().lower().strip(".")
+    if not domain:
+        return ""
+    parts = [p for p in domain.split(".") if p]
+    if len(parts) >= 2:
+        # Drop the TLD, plus a second-level public suffix ("co.uk", "com.au").
+        if len(parts) >= 3 and len(parts[-2]) <= 3 and len(parts[-1]) <= 3:
+            parts = parts[:-2]
+        else:
+            parts = parts[:-1]
+    label = parts[-1] if parts else ""
+    return label.replace("-", " ").replace("_", " ").strip()
+
+
+def poc_domain_mismatch_reason(email: str, research: dict, firm_name: str = "") -> Optional[tuple[str, str]]:
+    """(severity, message) where severity is "block" or "warn", or None when
+    the POC's email domain raises no question at all.
+
+    None when there is nothing to compare against -- no gate domain, or a
+    public mailbox (a real principal at a small firm legitimately uses Gmail;
+    that is a personal-address question, not a wrong-company one, and blocking
+    on it would cost real drafts for no evidence)."""
+    gate_domain = str((research or {}).get("own_domain")
+                     or (research or {}).get("domain") or "").strip().lower()
+    poc_domain = _email_domain(email)
+    if not gate_domain or not poc_domain:
+        return None
+    if poc_domain in _PUBLIC_EMAIL_DOMAINS:
+        return None
+    if poc_domain == gate_domain.strip().strip("."):
+        return None
+
+    foreign = signal_pipeline.foreign_domain_park_reason({"domain": poc_domain})
+    if foreign:
+        return ("block",
+                f"POC email domain {poc_domain} is in a different country from the "
+                f"gate's resolved domain {gate_domain} for {firm_name or 'this firm'} "
+                f"({foreign}). Not an affiliate domain; not drafted.")
+
+    gate_core, poc_core = _domain_core(gate_domain), _domain_core(poc_domain)
+    if not gate_core or not poc_core:
+        return None
+    if gate_core == poc_core:
+        return None
+    if wd_poc._firm_matches(poc_core, gate_core):
+        return ("warn",
+                f"POC email domain {poc_domain} differs from the gate's resolved "
+                f"domain {gate_domain}, but both read as the same firm. Possible "
+                f"affiliate or regional domain; drafted anyway.")
+    return ("block",
+            f"POC email domain {poc_domain} does not match the gate's resolved "
+            f"domain {gate_domain} for {firm_name or 'this firm'}. The contact and "
+            f"the researched firm may be two different companies; not drafted.")
 
 
 # ---------------------------------------------------------------------------
@@ -1243,6 +1363,16 @@ def _draft_one_firm(firm: dict, contacted_this_run: set[str], progress: Progress
     if norm_email in contacted_this_run:
         progress(f"{firm_name}: {poc_name} <{email}> already drafted earlier in this run. Blocked.")
         return "duplicate_within_run", firm
+
+    # Before anything is spent on a deck or an LLM draft: is this contact even
+    # at the firm the gate researched? (AlphaX, run 27 -- see the block above.)
+    domain_check = poc_domain_mismatch_reason(email, research, firm_name)
+    if domain_check:
+        severity, message = domain_check
+        progress(f"{firm_name}: {message}")
+        if severity == "block":
+            return "poc_domain_mismatch", {**firm, "poc_domain_mismatch_reason": message,
+                                          "poc_name": poc_name, "poc_email": email}
 
     prior = dbc.find_prior_contact(linkedin_url=None, email=email)
     collision_note = prior_contact_workflow = prior_contact_at = None

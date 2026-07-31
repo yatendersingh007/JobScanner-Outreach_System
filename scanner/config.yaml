@@ -216,10 +216,23 @@ poc_enrichment:
   cap_per_run: 10          # max NEW companies looked up per run (cached/skipped companies don't count)
   force_refresh: false      # true = ignore the cache and re-look-up every company (costs TinyFish steps)
   cache_db: poc_cache.db
-  # Staffing/recruiting firms — always skipped (poc_source = "skipped -
-  # staffing firm"), no TinyFish steps spent. Matches if a company name
-  # CONTAINS one of these (e.g. "Vaco" matches "Vaco by Highspring").
-  # You maintain this list — add more any time.
+  # Staffing/recruiting firms AND other non-employer professional-services
+  # firms (recruiters, CPA/tax practices, consultancies) — always skipped
+  # (poc_source = "skipped - staffing firm"), no TinyFish steps spent.
+  # Matches if a company name CONTAINS one of these, case-insensitive
+  # (e.g. "Vaco" matches "Vaco by Highspring"). You maintain this list —
+  # add more any time.
+  #
+  # Workflow D also applies this as a HARD DROP before the gate (see
+  # src/signal_pipeline.py's staffing_blocklist docstring) — none of these
+  # is a firm X Analyst can sell embedded staff to, and gating one burns
+  # both a Tavily budget slot and a slot out of the daily draft cap.
+  #
+  # Prefer a FULL, DISTINCTIVE name over a bare descriptive token. Bare
+  # "CPA" or "& Associates" would drop real firms, and a bare surname is
+  # worse still: family offices are an explicit ICP category and are
+  # routinely named after the family, so "Bachrach Group" is listed rather
+  # than "Bachrach".
   blocklist:
     - Vaco
     - Staffing
@@ -253,6 +266,32 @@ poc_enrichment:
     - Social Capital Resources
     - E-Frontiers
     - Wall Street Careers
+    # ── Added from the run-27 funnel audit ────────────────────────────────
+    # These six reached the gate and were each disqualified on firm type
+    # after spending 6 Tavily searches. Full names, not tokens: several are
+    # surnames or generic words that would over-match on their own.
+    - Henderson Harbor Group      # "talent placement for accounting, finance, tax & technology" (its own research)
+    - CPA Connections             # CPA/advisory practice. NOT bare "CPA" — that drops real firms
+    - Klausner & Company PC       # public accounting firm
+    - Susan Fitzgerald & Associates   # government/education consulting. NOT bare "& Associates"
+    - LG Legacy Group             # accounting and tax advisory
+    - Guidehouse                  # global consultancy
+    # Name-shape tokens for recruiters not yet seen by name.
+    - Recruiting                  # redundant with "Recruit" above; kept for readability
+    - Placement
+    - Search Advisors
+    # Named recruiters seen in run 25/27 output but not yet blocked.
+    - Bachrach Group              # "TBG | The Bachrach Group". NOT bare "Bachrach" — surname
+    - Insight Global
+    - Randstad
+    - Kforce
+    - Ledgent
+    - Camino Search
+    - Taurus Search
+    - Truity Partners
+    - Quest Financial
+    - Segrera Associates
+    - Orion Placement             # redundant with "Placement" above; kept for readability
 
 # Phone access — off by default (the app only serves 127.0.0.1, this PC).
 # Turn on to also install this as an app on your phone: set
