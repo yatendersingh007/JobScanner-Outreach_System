@@ -1717,3 +1717,298 @@ def test_draft_one_firm_proceeds_through_an_affiliate_warning(monkeypatch):
 def test_draft_batch_result_has_a_poc_domain_mismatch_bucket():
     assert sd.DraftBatchResult().poc_domain_mismatch == []
 
+
+
+# ---------------------------------------------------------------------------
+# Slide-01 redundancy, run-29 follow-up. Every string below is copied from the
+# regenerated Neal Communities and Choice NY decks in generated_decks_c/, and
+# the fill_data values from those firms' real wd_firms research blobs.
+#
+# Neal shipped five bullets of which three restated something already on the
+# same slide: the Founded card, the AUM tile, and the italic headline.
+# ---------------------------------------------------------------------------
+_NEAL_ONELINER = ("Homebuilder/developer focusing on single-family and townhome "
+                  "communities in Southwest Florida")
+_NEAL_BULLETS = [
+    "Founded in 1970",
+    "Homebuilder/developer focusing on single-family and townhome communities",
+    "Operates in Southwest Florida (Sarasota/Lakewood Ranch), US",
+    "Reported $1 billion annual revenue in Apr 2024 article",
+    "Disclosed AUM: $700 million",
+]
+# build_fill_data()'s real output for wd_firms id 72. NOTE it emits no
+# "disclosed_figure" key at all -- the disclosed figure reaches the tile as
+# aum_value -- so that comparand is inert today and kept only so it starts
+# working automatically if deck_filler ever adds the key.
+_NEAL_FILL = {"founded_year": "1970", "aum_value": "$700 million", "aum_label": "AUM",
+              "aum_asof": ""}
+_CHOICE_FILL = {"founded_year": "", "aum_value": "$250 million",
+                "aum_label": "Assets Valued", "aum_asof": ""}
+
+
+def test_oneliner_substring_bullet_is_dropped():
+    """The live Neal case the old exact-match guard missed: the bullet is the
+    headline minus its trailing " in Southwest Florida"."""
+    bullet = "Homebuilder/developer focusing on single-family and townhome communities"
+
+    assert sd._is_oneliner_restatement(bullet, _NEAL_ONELINER) is True
+
+
+def test_oneliner_superstring_bullet_is_dropped():
+    """The reverse direction: a bullet that wraps the whole headline."""
+    bullet = _NEAL_ONELINER + " serving move-up buyers"
+
+    assert sd._is_oneliner_restatement(bullet, _NEAL_ONELINER) is True
+
+
+def test_oneliner_exact_and_prefix_cases_still_work():
+    """The pre-existing guard's own cases must not regress."""
+    assert sd._is_oneliner_restatement(_ONELINER, _ONELINER) is True
+    assert sd._is_oneliner_restatement(f"Firm described as {_ONELINER}", _ONELINER) is True
+
+
+@pytest.mark.parametrize("bullet", [
+    "Multifamily",
+    "Southwest Florida",
+    "Townhome communities",
+    "Homebuilder",
+])
+def test_oneliner_short_bullets_survive_incidental_containment(bullet):
+    """A short bullet that happens to appear inside a long headline is not a
+    restatement -- this is what the length floor protects."""
+    assert sd._is_oneliner_restatement(bullet, _NEAL_ONELINER) is False
+
+
+def test_oneliner_length_floor_boundary():
+    """At the floor a contained bullet drops; one character under, it does
+    not."""
+    oneliner = "A" * 60
+    assert sd._is_oneliner_restatement("A" * sd._MIN_ONELINER_OVERLAP_CHARS, oneliner) is True
+    assert sd._is_oneliner_restatement("A" * (sd._MIN_ONELINER_OVERLAP_CHARS - 1), oneliner) is False
+
+
+def test_oneliner_distinct_long_bullet_survives():
+    bullet = "Operates in Southwest Florida (Sarasota/Lakewood Ranch), US"
+
+    assert sd._is_oneliner_restatement(bullet, _NEAL_ONELINER) is False
+
+
+@pytest.mark.parametrize("research_oneliner", ["", None, "   "])
+def test_oneliner_rule_needs_a_oneliner(research_oneliner):
+    assert sd._is_oneliner_restatement("anything at all here", research_oneliner) is False
+
+
+# --- stat tile rule -------------------------------------------------------
+def _tiles(fill_data):
+    return sd._stat_tile_comparands(fill_data)
+
+
+@pytest.mark.parametrize("bullet", [
+    "Founded in 1970",                    # live Neal bullet vs the Founded card
+    "Founded 1970",
+    "Established in 1970",
+    "Founded in 1970.",
+])
+def test_stat_tile_founded_year_restatement_is_dropped(bullet):
+    values, labels = _tiles(_NEAL_FILL)
+    assert sd._is_stat_tile_restatement(bullet, values, labels) is True
+
+
+@pytest.mark.parametrize("bullet", [
+    "Disclosed AUM: $700 million",        # live Neal bullet vs the AUM tile
+    "AUM of $700 million",
+    "Manages approximately $700 million",
+    "Reported AUM $700 million",
+])
+def test_stat_tile_aum_restatement_is_dropped(bullet):
+    values, labels = _tiles(_NEAL_FILL)
+    assert sd._is_stat_tile_restatement(bullet, values, labels) is True
+
+
+def test_stat_tile_choice_ny_assets_valued_restatement_is_dropped():
+    """Live Choice NY bullet. The tile already reads "$250 million / Assets
+    Valued", so "Manages assets valued at $250 million" adds nothing."""
+    values, labels = _tiles(_CHOICE_FILL)
+
+    assert sd._is_stat_tile_restatement("Manages assets valued at $250 million",
+                                        values, labels) is True
+
+
+@pytest.mark.parametrize("bullet", [
+    # The live Neal bullet that is the slide's most interesting fact. It
+    # carries a figure, but no tile shows it.
+    "Reported $1 billion annual revenue in Apr 2024 article",
+    "Operates in Southwest Florida (Sarasota/Lakewood Ranch), US",
+    "Sold to Associa Corp. in 2021 with an earn-out noted",
+])
+def test_stat_tile_rule_keeps_bullets_no_tile_shows(bullet):
+    values, labels = _tiles(_NEAL_FILL)
+    assert sd._is_stat_tile_restatement(bullet, values, labels) is False
+
+
+@pytest.mark.parametrize("bullet", [
+    "Founded in 1970 by Pat Neal in Sarasota",
+    "Founded in 1970 and now builds in six counties",
+    "AUM of $700 million across 12 active communities",
+])
+def test_stat_tile_rule_keeps_a_bullet_that_adds_another_fact(bullet):
+    """Containing the tile's value is not enough -- the bullet has to add
+    nothing else."""
+    values, labels = _tiles(_NEAL_FILL)
+    assert sd._is_stat_tile_restatement(bullet, values, labels) is False
+
+
+def test_stat_tile_rule_matches_across_magnitude_wording():
+    """"$4.4 billion" in a bullet and "$4.4B" on the tile are one figure --
+    the master's own Kingbird bullet/tile pair."""
+    fill = {"founded_year": "2008", "aum_value": "$4.4B", "aum_label": "Gross Asset Value"}
+    values, labels = _tiles(fill)
+
+    assert sd._is_stat_tile_restatement("Manages $4.4 billion in gross asset value",
+                                        values, labels) is True
+
+
+def test_stat_tile_rule_does_not_fold_a_fully_written_out_number():
+    """Documented limit, not a bug to paper over: "$700,000,000" and a
+    "$700 million" tile are the same money, but folding digit strings to
+    magnitude words is a bigger normalization than this check needs, so the
+    bullet survives. The forms deck_filler and the model actually produce
+    ("$700 million" / "$700M" / "$4.4B") all fold correctly."""
+    values, labels = _tiles(_NEAL_FILL)
+
+    assert sd._is_stat_tile_restatement("Total AUM: $700,000,000", values, labels) is False
+
+
+def test_stat_tile_rule_respects_word_boundaries():
+    """A bare year must not match inside a longer number or a decade."""
+    values, labels = _tiles(_NEAL_FILL)
+
+    assert sd._is_stat_tile_restatement("Built its first community in the 1970s boom",
+                                        values, labels) is False
+    assert sd._is_stat_tile_restatement("Delivered 19700 homes to date", values, labels) is False
+
+
+@pytest.mark.parametrize("fill", [
+    {}, None,
+    {"founded_year": "", "aum_value": "", "aum_label": ""},
+])
+def test_stat_tile_rule_is_inert_when_no_tile_is_populated(fill):
+    """An empty tile is a deleted card (see _delete_empty_deck_shapes) -- a
+    bullet cannot be redundant with a card that will not render."""
+    values, labels = _tiles(fill)
+
+    assert values == []
+    assert sd._is_stat_tile_restatement("Founded in 1970", values, labels) is False
+
+
+def test_stat_tile_comparands_reads_the_three_fill_data_fields():
+    values, labels = _tiles({"founded_year": "1970", "aum_value": "$700 million",
+                            "disclosed_figure": "$700M", "aum_label": "AUM",
+                            "disclosed_label": "assets under management"})
+
+    assert values == ["1970", "$700 million", "$700M"]
+    assert "aum" in labels and "assets" in labels and "management" in labels
+
+
+# --- both rules together, on the live decks --------------------------------
+def test_drop_bullets_neal_regression_end_to_end():
+    """The regenerated Neal deck: five bullets in, the two genuinely distinct
+    facts out."""
+    kept = sd._drop_oneliner_duplicate_bullets(_NEAL_BULLETS, _NEAL_ONELINER, _NEAL_FILL)
+
+    assert kept == [
+        "Operates in Southwest Florida (Sarasota/Lakewood Ranch), US",
+        "Reported $1 billion annual revenue in Apr 2024 article",
+    ]
+
+
+def test_drop_bullets_choice_ny_regression_end_to_end():
+    """Choice NY's headline duplicate was already clean; its AUM bullet was
+    not. This is a change beyond the three Neal cases and is deliberate: the
+    tile already reads "$250 million / Assets Valued"."""
+    bullets = [
+        "Operates as a third-party residential & mixed-use property manager",
+        "Manages assets valued at $250 million",
+        "Focuses on the New York metropolitan area",
+        "Sold to Associa Corp. in 2021 with an earn-out noted",
+    ]
+
+    kept = sd._drop_oneliner_duplicate_bullets(
+        bullets, "Residential & mixed-use property management, third-party operator", _CHOICE_FILL)
+
+    assert kept == [
+        "Operates as a third-party residential & mixed-use property manager",
+        "Focuses on the New York metropolitan area",
+        "Sold to Associa Corp. in 2021 with an earn-out noted",
+    ]
+
+
+def test_drop_bullets_without_fill_data_applies_only_the_headline_rule():
+    """fill_data omitted is the pre-existing behavior: the headline duplicate
+    goes, the stat restatements stay."""
+    kept = sd._drop_oneliner_duplicate_bullets(_NEAL_BULLETS, _NEAL_ONELINER)
+
+    assert "Founded in 1970" in kept
+    assert "Disclosed AUM: $700 million" in kept
+    assert "Homebuilder/developer focusing on single-family and townhome communities" not in kept
+
+
+def test_drop_bullets_keeps_five_distinct_bullets_untouched():
+    """The Kingbird quality reference: five distinct bullets, nothing dropped."""
+    bullets = [
+        "Vertically integrated multifamily investment manager operating since 2008.",
+        "Concentrated portfolio across Texas and the Southeast United States.",
+        "Uses LP, GP, and co-GP structures alongside preferred equity on individual deals.",
+        "Appointed a dedicated Director of Capital Markets in 2019.",
+        "Acts as fiduciary for a family office and third-party investors.",
+    ]
+    fill = {"founded_year": "", "aum_value": "", "aum_label": ""}
+
+    assert sd._drop_oneliner_duplicate_bullets(
+        bullets, "Kingbird Investment Management is a test firm.", fill) == bullets
+
+
+@pytest.mark.parametrize("bullets", [[], None])
+def test_drop_bullets_handles_no_bullets_with_fill_data(bullets):
+    assert sd._drop_oneliner_duplicate_bullets(bullets, _NEAL_ONELINER, _NEAL_FILL) == []
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("$4.4 billion", "$4.4b"),
+    ("$4.4B", "$4.4b"),
+    ("$700 million", "$700m"),
+    ("$700M", "$700m"),
+    ("$700,000,000", "$700000000"),
+    ("$1 trillion", "$1t"),
+    ("1970", "1970"),
+])
+def test_norm_money_folds_magnitude_wording(text, expected):
+    assert sd._norm_money(text) == expected
+
+
+def test_generate_deck_passes_real_fill_data_to_the_dedup(monkeypatch):
+    """The tile rule needs build_fill_data()'s own output, so _generate_deck
+    must call it BEFORE build_and_convert and hand the result to the dedup."""
+    seen = {}
+    monkeypatch.setattr(sd.deck_filler, "get_deck_content",
+                        lambda firm_name, research, personalization: {
+                            "profile_bullets": list(_NEAL_BULLETS), "fit_paragraphs": {}})
+    monkeypatch.setattr(sd.deck_filler, "build_fill_data",
+                        lambda firm_name, research, deck_content, personalization=None:
+                        dict(_NEAL_FILL))
+
+    def fake_build_and_convert(firm_name, research, deck_content, progress=None, personalization=None):
+        seen["bullets"] = list(deck_content["profile_bullets"])
+        return {"pptx_path": None, "pdf_path": "deck.pdf", "fill_data": dict(_NEAL_FILL)}
+
+    monkeypatch.setattr(sd.deck_filler, "build_and_convert", fake_build_and_convert)
+
+    result = sd._generate_deck("Neal Communities of Southwest Florida, Inc.",
+                               {"firm_oneliner": _NEAL_ONELINER}, progress=lambda m: None)
+
+    assert result == "deck.pdf"
+    assert seen["bullets"] == [
+        "Operates in Southwest Florida (Sarasota/Lakewood Ranch), US",
+        "Reported $1 billion annual revenue in Apr 2024 article",
+    ]
+

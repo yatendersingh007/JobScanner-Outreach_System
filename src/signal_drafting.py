@@ -1273,11 +1273,138 @@ def _norm_for_oneliner_compare(text: str) -> str:
     return _WS_RE.sub(" ", _strip_oneliner_lead_in(text).strip().rstrip(".")).lower()
 
 
-def _drop_oneliner_duplicate_bullets(bullets: list, oneliner: str) -> list:
-    target = _norm_for_oneliner_compare(oneliner)
-    if not target:
-        return bullets or []
-    return [b for b in (bullets or []) if _norm_for_oneliner_compare(b) != target]
+# Run-29 follow-up, regenerated Neal Communities deck: three of five slide-01
+# bullets restated something else already on the same slide.
+#
+#   "Founded in 1970"                        <- the Founded stat card ("1970")
+#   "Disclosed AUM: $700 million"            <- the AUM stat tile ("$700 million")
+#   "Homebuilder/developer focusing on
+#    single-family and townhome communities"  <- the italic firm_oneliner headline,
+#                                                minus its trailing " in Southwest Florida"
+#
+# The exact-match guard above misses the third because it is a SUBSTRING of the
+# headline, not a prefix variant of it. Hence two additions:
+#
+# (a) substring containment in EITHER direction, above a length floor. A
+# 30-character floor on the SHORTER side is what keeps a legitimately short
+# bullet from being eaten by an incidental appearance in a long headline
+# ("Multifamily" inside "...multifamily housing..." is not a restatement); the
+# live case clears it with 71 characters.
+#
+# (b) a bullet that restates a POPULATED stat tile. The value alone is not
+# enough to drop on -- "Reported $1 billion annual revenue in Apr 2024
+# article" mentions a figure but is the slide's most interesting fact and no
+# tile shows it. The test is: the bullet contains the tile's own value AND,
+# once that value, the tile's label words, and connective filler are removed,
+# no substantive word is left. "Founded in 1970 by Pat Neal in Sarasota" keeps
+# pat/neal/sarasota and survives.
+_MIN_ONELINER_OVERLAP_CHARS = 30
+
+# "$4.4 billion" and a tile reading "$4.4B" are the same figure. Normalizing
+# the magnitude word to its initial is what lets containment see that; without
+# it the master's own "Manages $4.4 billion in gross asset value" bullet reads
+# as a different fact from its "$4.4B" tile.
+_MONEY_MAGNITUDE_RE = re.compile(r"(\d)\s*(?:billion|bn|b)\b", re.IGNORECASE)
+_MONEY_MILLION_RE = re.compile(r"(\d)\s*(?:million|mm|m)\b", re.IGNORECASE)
+_MONEY_TRILLION_RE = re.compile(r"(\d)\s*(?:trillion|tn|t)\b", re.IGNORECASE)
+_NUM_COMMA_RE = re.compile(r"(?<=\d),(?=\d{3})")
+
+# Connective/qualifier words that carry no fact of their own. A residue made
+# only of these (plus the tile's own label words) means the bullet said
+# nothing the tile did not already say.
+_STAT_FILLER_WORDS = frozenset({
+    "a", "an", "the", "of", "in", "at", "on", "to", "as", "is", "was", "are",
+    "were", "and", "or", "with", "its", "their", "has", "have", "had", "been",
+    "about", "approximately", "around", "roughly", "over", "under", "than",
+    "more", "less", "least", "nearly", "some", "total", "totaling", "totalling",
+    "currently", "now", "today", "reported", "reportedly", "reports",
+    "disclosed", "discloses", "stated", "states", "manages", "managing",
+    "management", "manager", "holds", "holding", "oversees", "operating",
+    "operates", "firm", "company", "since", "founded", "established", "est",
+    "year", "years", "circa", "per", "approx", "aum", "usd",
+})
+_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9'&/-]*")
+
+
+def _norm_money(text: str) -> str:
+    text = _NUM_COMMA_RE.sub("", (text or "").lower())
+    text = _MONEY_TRILLION_RE.sub(r"\1t", text)
+    text = _MONEY_MAGNITUDE_RE.sub(r"\1b", text)
+    text = _MONEY_MILLION_RE.sub(r"\1m", text)
+    return _WS_RE.sub(" ", text).strip()
+
+
+def _is_oneliner_restatement(bullet: str, oneliner: str) -> bool:
+    """True if the bullet says what the italic headline already says: equal
+    after lead-in stripping (the original guard), or one wholly contained in
+    the other above the length floor."""
+    b = _norm_for_oneliner_compare(bullet)
+    o = _norm_for_oneliner_compare(oneliner)
+    if not b or not o:
+        return False
+    if b == o:
+        return True
+    shorter, longer = (b, o) if len(b) <= len(o) else (o, b)
+    if len(shorter) < _MIN_ONELINER_OVERLAP_CHARS:
+        return False
+    return shorter in longer
+
+
+def _is_stat_tile_restatement(bullet: str, tile_values: list, label_words: frozenset) -> bool:
+    """True if the bullet contains one of the populated tiles' values and adds
+    no other fact of its own."""
+    b = _norm_money(bullet)
+    if not b:
+        return False
+    for value in tile_values:
+        v = _norm_money(value)
+        if not v:
+            continue
+        # Word-boundary match so a bare year ("1970") does not match inside
+        # "1970s" or a longer number, and so "$700m" needs to stand alone.
+        pattern = re.compile(r"(?<![a-z0-9])" + re.escape(v) + r"(?![a-z0-9])")
+        if not pattern.search(b):
+            continue
+        residue = pattern.sub(" ", b)
+        leftover = {w for w in _TOKEN_RE.findall(residue)
+                   if w not in _STAT_FILLER_WORDS and w not in label_words}
+        if not leftover:
+            return True
+    return False
+
+
+def _stat_tile_comparands(fill_data: dict) -> tuple[list, frozenset]:
+    """(values shown on populated tiles, words those tiles' labels use).
+
+    Exactly the three fill_data fields the tiles are filled from, read off
+    deck_filler's own output rather than re-derived from research -- so a
+    change in how it picks a figure can't silently desync this check. The
+    labels feed the residue test: "AUM" in "Disclosed AUM: $700 million" is
+    the tile's own caption, not a fact the bullet adds."""
+    fill_data = fill_data or {}
+    values = [str(fill_data.get(k) or "").strip()
+              for k in ("founded_year", "aum_value", "disclosed_figure")]
+    label_words = set()
+    for key in ("aum_label", "disclosed_label", "aum_asof"):
+        label_words.update(_TOKEN_RE.findall(_norm_money(str(fill_data.get(key) or ""))))
+    return [v for v in values if v], frozenset(label_words)
+
+
+def _drop_oneliner_duplicate_bullets(bullets: list, oneliner: str,
+                                     fill_data: Optional[dict] = None) -> list:
+    """Bullets with the slide-01 restatements removed: of the italic headline,
+    and of any populated stat tile. `fill_data` omitted skips the tile rule
+    (the headline rule alone is the pre-existing behavior)."""
+    tile_values, label_words = _stat_tile_comparands(fill_data)
+    has_oneliner = bool(_norm_for_oneliner_compare(oneliner))
+    kept = []
+    for bullet in (bullets or []):
+        if has_oneliner and _is_oneliner_restatement(bullet, oneliner):
+            continue
+        if tile_values and _is_stat_tile_restatement(bullet, tile_values, label_words):
+            continue
+        kept.append(bullet)
+    return kept
 
 
 def _generate_deck(firm_name: str, research: dict, progress: Progress) -> Optional[str]:
@@ -1290,9 +1417,21 @@ def _generate_deck(firm_name: str, research: dict, progress: Progress) -> Option
         deck_content = deck_filler.get_deck_content(firm_name, research, personalization={})
         deck_content["tokens_used"] = gate_config.MAX_LLM_TOKENS_PER_FIRM
         oneliner = str((research or {}).get("firm_oneliner") or "").strip()
-        if oneliner and deck_content.get("profile_bullets"):
+        if deck_content.get("profile_bullets"):
+            # The stat-tile rule needs the tile values, which only
+            # build_fill_data() produces -- and build_and_convert() calls it
+            # internally, AFTER the bullets are already baked in. So it is
+            # called here first, for its three tile fields only. That is free
+            # and deterministic: with tokens_used forced to the cap above, its
+            # one LLM path (the Part C retry) is declined, leaving a pure
+            # function over research + deck_content. build_and_convert() then
+            # recomputes the same values from the same research; none of the
+            # three depends on profile_bullets, so the tiles it fills are
+            # identical to the ones compared against here.
+            fill_data = deck_filler.build_fill_data(firm_name, research, deck_content,
+                                                    personalization={})
             deck_content["profile_bullets"] = _drop_oneliner_duplicate_bullets(
-                deck_content["profile_bullets"], oneliner)
+                deck_content["profile_bullets"], oneliner, fill_data)
         result = deck_filler.build_and_convert(firm_name, research, deck_content,
                                                progress=progress, personalization={})
     except Exception as e:  # noqa: BLE001 - a deck failure must never block a draft

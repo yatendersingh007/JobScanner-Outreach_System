@@ -2202,3 +2202,144 @@ Only the blocklist hunk is in this commit: the staged blob was built as HEAD
 plus the blocklist change, so those operator edits remain unstaged and
 untouched. Both the staged and working-tree versions parse as valid YAML.
 
+
+## Slide-01 bullet redundancy: headline substring and stat-tile restatement - 2026-08-09
+
+The regenerated Neal Communities deck shipped five profile bullets of which
+three restated something already on the same slide. Confirmed by reading
+`ppt/slides/slide3.xml` out of both decks in `generated_decks_c/` (regenerated
+15:59-16:00, after the previous commit's shape work landed):
+
+| bullet | duplicates |
+|---|---|
+| `Founded in 1970` | the Founded stat card (`Text 9` = `1970`) |
+| `Disclosed AUM: $700 million` | the AUM stat tile (`Text 5` = `$700 million`) |
+| `Homebuilder/developer focusing on single-family and townhome communities` | the italic headline, minus its trailing ` in Southwest Florida` |
+
+### Rule A: headline containment, either direction, above a length floor
+
+`_is_oneliner_restatement`. The old guard compared exact strings after
+lead-in stripping, so it caught "Firm described as X" but not a substring.
+Now either string may contain the other, subject to a 30-character floor on
+the SHORTER side. The floor is what keeps a legitimately short bullet from
+being eaten by an incidental appearance in a long headline: "Multifamily" or
+"Southwest Florida" inside this headline is not a restatement. The live case
+clears the floor with 71 characters.
+
+### Rule B: restatement of a POPULATED stat tile
+
+`_is_stat_tile_restatement`. The value alone is not grounds to drop —
+"Reported $1 billion annual revenue in Apr 2024 article" carries a figure and
+is the slide's most interesting fact, and no tile shows it. The test is: the
+bullet contains a tile's own value AND, once that value, the tile's label
+words, and connective filler are removed, no substantive word remains.
+"Founded in 1970 by Pat Neal in Sarasota" keeps pat/neal/sarasota and
+survives.
+
+Tile values come from `deck_filler.build_fill_data()`'s own output, not from a
+re-derivation off `research`, so a change in how it picks a figure cannot
+silently desync this check. That required calling `build_fill_data()` in
+`_generate_deck` BEFORE `build_and_convert()` (which calls it internally, but
+only after the bullets are already baked in). That call is free and
+deterministic: with `tokens_used` forced to the cap, its one LLM path (the
+Part C retry) is declined, leaving a pure function over research +
+deck_content. None of the three tile fields depends on `profile_bullets`, so
+the values compared against are identical to the ones the deck ends up with.
+Cost is a duplicated `[DECK EMPTY]`/`[DECK RETRY]` diagnostic line per blank
+fit key in the live log.
+
+`$4.4 billion` and a tile reading `$4.4B` are one figure, so `_norm_money`
+folds the magnitude word to its initial before comparing. Value matching is
+word-boundary anchored, so a bare year cannot match inside `1970s` or `19700`.
+
+**Finding worth recording: `fill_data` has no `disclosed_figure` key.**
+`build_fill_data()` returns 21 keys and that is not one of them — the
+disclosed figure reaches the tile as `aum_value`. The key is still read (it
+costs nothing and starts working automatically if deck_filler ever adds it),
+but today `founded_year` and `aum_value` are the two live comparands.
+
+**Bug caught by the suite, in this change: `_WORD_RE` collision.** The new
+token-splitting pattern was named `_WORD_RE`, which is already a module-level
+constant at line 261 — the `{banned word: compiled regex}` dict that
+`find_style_violations` iterates. Shadowing it silently disabled the entire
+banned-word style check (HARD RULE style section); five pre-existing tests
+failed with `'re.Pattern' object has no attribute 'items'`. Renamed to
+`_TOKEN_RE`, and re-verified the guard flags `leverage`, `robust`,
+`comprehensive` again.
+
+### Verified visually
+
+Both decks rebuilt from their real `wd_firms` research blobs and rendered to
+PDF. Neal slide 01: two tiles filled, two distinct bullets, zero repetition,
+no stray empty bullet glyphs, "Investing since" still gone. Choice NY: one
+tile, three distinct bullets, zero repetition.
+
+**Choice NY loses a fourth bullet, beyond the three Neal cases, and that is
+deliberate.** `Manages assets valued at $250 million` restates a tile reading
+`$250 million / Assets Valued`; every word in the residue is either the tile's
+label or filler. It follows directly from Rule B as specified.
+
+**Side effect worth flagging: dedup makes the empty lower slide worse.** Neal
+goes from five bullets to two. The redundancy was padding the slide out. The
+lower ~40% of slide 01 is now clearly empty, which is the subject of the
+report below.
+
+### Report, no change: could a third or fourth stat tile be populated?
+
+**No, not in this master, and the data does not support it either.**
+
+Geometry, measured from `templates/Pitch_Master.pptx`:
+
+- Slide is 10.00 x 5.62 in. The stat column is `x=6.95, w=2.55`.
+- Card 1 (`Shape 4`): `y=1.50, h=1.28`, bottom 2.78. Card 2 (`Shape 8`):
+  `y=2.98, h=1.28`, bottom 4.26. Pitch 1.48 in.
+- **There is no third or fourth card shape in the file.** The grid is a single
+  column of exactly two.
+- A third card at the existing pitch would sit at `y=4.46` and bottom at
+  **5.74 in — 0.12 in below the slide's bottom edge**. It would also collide
+  with the capital-stack footer (`y=4.95, h=0.50`, full width) whenever
+  `capital_stack` is populated.
+- A 2x2 grid would halve the column to ~1.2 in. `deck_filler`'s own
+  `_AUM_VALUE_TILE_MAX_CHARS = 13` is calibrated to 2.19 in at 22 pt, so
+  halving the width halves the budget to ~6 characters. `$700 million` is 12.
+  Not viable without changing the master's geometry or font sizes.
+
+What would populate one, and how often. Across all 83 `wd_firms` rows,
+**26 (31%) have a `recent_event` currency figure distinct from the AUM
+figure** — but only **3 of those 26 rows are qualified firms** (Shinda
+`$175M`, Neal `$1 billion` twice), and qualified firms are the only ones that
+get a deck. Worse, most of those figures are not the firm's own scale metric
+and would be actively misleading on a stat tile:
+
+- Guidehouse `$5.3B` — the price someone paid to acquire it
+- Chipotle `$50M` — a venture fund it launched
+- EliseAI `$250M` / `$2.2B` — a funding round and a valuation
+- Brixmor `$416.8M` — property it bought, not property it owns
+- Raptor Group `$200M` — a fund it is still trying to raise
+
+Only Neal's `$1 billion annual revenue` and UVIMCO's `$15.5B Long Term Pool
+AUM` read as genuine firm-scale metrics. `recent_event` is free prose with no
+value/label/source structure, so populating a tile from it needs either a new
+structured gate output field (a vendored `icp_gate.py` change plus a donor
+filing) or prose parsing here — and that parsing would hit the same
+direction problem the acquired-by park already has to solve.
+
+The more honest read of the empty space: the two tiles that already exist are
+usually unpopulated. `disclosed_figure` is set on 32/83 rows, `founded_year`
+on 30/83, `aum_asof` on 16/83, `capital_stack` on 11/83. Slide 01 is sparse
+because the research often has fewer than two disclosed facts, not because
+the template is short of tile slots. Filling the space needs either better
+research coverage or a template whose slide-01 layout does not assume four
+populated regions.
+
+For the record, the "Kingbird quality reference" of five distinct bullets and
+four filled tiles describes `Pitch_Master.pptx` itself, which is a
+hand-authored Kingbird deck. Workflow C's own GENERATED Kingbird deck has all
+six bullet runs partly blank, both stat cards present with every value run
+empty, a dangling "Capital stack complexity:" label, and a dangling
+"Investing since" — the same defects fixed here across the last three
+commits.
+
+623 tests pass, up from 575. No vendored `.py` file touched. No scan command
+run.
+
