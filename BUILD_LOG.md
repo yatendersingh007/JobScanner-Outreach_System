@@ -2511,3 +2511,35 @@ lack of any signal. The false-discard rate is real. TinyFish cannot fix it.
 Recommendation on record: shift budget from TinyFish LinkedIn targets to
 JSearch queries. JSearch returns 2000-char descriptions, classifies at 33%,
 and costs seconds instead of ~2 hours per run.
+
+## ATS channel: ~0% coverage for this ICP - 2026-07-31
+
+Probed 15 candidate RE firms (from the run-25/27 discard analysis plus known
+large operators) against Greenhouse, Lever and Ashby public board APIs. All
+free, no key. Slug variants tried per firm: concatenated, hyphenated, and
+with the trailing legal/descriptor word dropped.
+
+Result: 1 apparent hit of 15, and that hit is a bare generic slug
+("ashby:stream", 3 roles) that is likely an unrelated company, not Stream
+Realty Partners.
+
+Firms with no public board on any of the three platforms: RREAF Holdings,
+America West Properties, Invest with Roots, Osprey Management, Singh
+Management, Signorelli Company, Baywater Properties, Aureate Group, Kidder
+Mathews, Greystar, Empire State Realty Trust, Equity LifeStyle Properties,
+Brixmor, Neal Communities.
+
+Conclusion: mid-size RE operators in the $200M-$2B band do not use the modern
+ATS platforms this connector supports. The ats: connector stays enabled with
+an empty companies list; there is nothing to populate it with.
+
+Third negative result in sequence, all measured:
+  - classifier keyword tuning: recovers 11 of 229 discarded companies (4.8%)
+  - TinyFish descriptions: LinkedIn UI chrome, zero employer signal
+  - ATS coverage: ~0% for this ICP
+
+Structural finding: firms in this band hire finance staff through recruiters,
+which masks the employer in the posting, and do not expose first-party ATS
+feeds. Job-posting scanning is a weak channel for this ICP regardless of
+further engineering. Run 27 measured the ceiling: 227 postings -> 16 companies
+gated -> 1 qualified firm surviving every check.
