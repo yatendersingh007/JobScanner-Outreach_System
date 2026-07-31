@@ -1517,55 +1517,58 @@ def _aum_basis_bullet(research: dict) -> str:
 def compose_profile_bullets(research: dict, category: str = "", subcategory: str = "",
                            icp_reason: str = "") -> list:
     """Slide-01 bullets templated from research, in the fixed order founding,
-    location, scale/figures, focus, domain.
+    location, scale/figures, domain.
 
-    Below _BULLET_FLOOR lines, grounded derivable lines are appended in the
-    scale/figures band -- the AUM basis, then the gate's own reason if it is
-    client-safe. Never generic filler: if the research carries nothing more,
-    the slide ships short (HARD RULE 5)."""
+    There is deliberately NO focus bullet. The navy footer already carries the
+    focus and carries it better -- "Focus: {category} · {subcategory}" against
+    a bullet's subcategory alone -- and showing both put the same phrase on the
+    slide twice. `category`/`subcategory` are still accepted so the signature
+    matches the footer's and callers pass one set of arguments.
+
+    Below _BULLET_FLOOR lines, grounded derivable lines join the scale/figures
+    band -- the AUM basis, then the gate's own reason if it is client-safe.
+    Never generic filler: if the research carries nothing more, the slide ships
+    short (HARD RULE 5)."""
     research = research or {}
 
     def field(name: str) -> str:
         return str(research.get(name) or "").strip()
 
-    bullets: list[str] = []
+    # Built as explicit bands rather than one list with a computed insert
+    # index, so the declared order is readable and a floor top-up lands at the
+    # END of the figures band (after the reported event, which is the more
+    # interesting line) instead of ahead of it.
+    founding, location, figures, domain = [], [], [], []
+
     founded = field("founded_year")
     if founded:
-        bullets.append(f"Founded in {founded}")
+        founding.append(f"Founded in {founded}")
 
-    location = field("geography")
-    if location:
-        bullets.append(f"Operates in {location}")
+    where = field("geography")
+    if where:
+        location.append(f"Operates in {where}")
 
     event = field("recent_event")
     if event and event.lower() != "none":
-        bullets.append(event if _is_sentence(event) else f"Reported: {event}")
+        figures.append(event if _is_sentence(event) else f"Reported: {event}")
 
-    focus = (subcategory or "").strip()
-    if focus:
-        bullets.append(f"Focus: {focus}")
+    site = field("own_domain") or field("domain")
+    if site:
+        domain.append(site)
 
-    domain = field("own_domain") or field("domain")
-    if domain:
-        bullets.append(domain)
+    def total() -> int:
+        return len(founding) + len(location) + len(figures) + len(domain)
 
-    if len(bullets) >= _BULLET_FLOOR:
-        return bullets
+    if total() < _BULLET_FLOOR:
+        basis = _aum_basis_bullet(research)
+        if basis and basis not in figures:
+            figures.append(basis)
+    if total() < _BULLET_FLOOR:
+        reason = (icp_reason or "").strip()
+        if reason and not _ICP_REASON_UNSAFE_RE.search(reason):
+            figures.append(reason)
 
-    # Floor top-ups, inserted in the scale/figures band rather than appended
-    # after the domain, so the declared order still holds.
-    insert_at = len([b for b in bullets if b.startswith(("Founded in ", "Operates in "))])
-    extras = []
-    basis = _aum_basis_bullet(research)
-    if basis and basis not in bullets:
-        extras.append(basis)
-    reason = (icp_reason or "").strip()
-    if (reason and not _ICP_REASON_UNSAFE_RE.search(reason)
-            and len(bullets) + len(extras) < _BULLET_FLOOR):
-        extras.append(reason)
-    for offset, extra in enumerate(extras):
-        bullets.insert(insert_at + offset, extra)
-    return bullets
+    return founding + location + figures + domain
 
 
 # ---------------------------------------------------------------------------
@@ -1575,14 +1578,56 @@ def compose_profile_bullets(research: dict, category: str = "", subcategory: str
 # intended, instead of flattening both into one run.
 _FOOTER_SEPARATOR = " · "
 
+# Subcategory values are the CLASSIFIER's internal taxonomy, keyed to the
+# title-matching rule lists in classifier_rules.yaml. "Fund Operations/Back
+# Office" and "Investment Analyst/Underwriting" are triage labels for our own
+# routing; on a deck the prospect reads, they are our jargon. This maps each
+# declared subcategory to a phrase written for that reader.
+#
+# Covers all 8 names declared in classifier_rules.yaml (Real Estate's seven and
+# Family Office's three, overlapping on Investor Relations and Fund
+# Operations/Back Office). Keys are matched case-insensitively on the stripped
+# raw value; anything unmapped falls back to the raw value verbatim, so a new
+# subcategory added to the YAML degrades to today's behavior rather than
+# vanishing from the footer.
+#
+# "Needs Review" maps to "" ON PURPOSE. It is not a focus at all -- the
+# classifier assigns it when a title matches none of its category's rules, so
+# it means "we have not decided", and printing it, or inventing a specific
+# focus in its place, would both be worse than showing the category alone.
+_SUBCATEGORY_DISPLAY: dict[str, str] = {
+    "property accounting": "Property accounting",
+    "fund operations/back office": "Fund operations and back-office finance",
+    "investment analyst/underwriting": "Acquisitions and underwriting",
+    "fund accountant": "Fund accounting",
+    "staff accountant": "General accounting and controllership",
+    "asset analyst": "Asset management",
+    "investor relations": "Investor relations and reporting",
+    "accounts payable": "Accounts payable",
+    "needs review": "",
+}
+
+
+def subcategory_display(subcategory: str) -> str:
+    """The client-facing phrase for a classifier subcategory, the raw value
+    when it is not mapped, or "" for a value that is not a focus."""
+    raw = (subcategory or "").strip()
+    if not raw:
+        return ""
+    return _SUBCATEGORY_DISPLAY.get(raw.lower(), raw)
+
 
 def footer_focus_text(capital_stack: str, category: str = "", subcategory: str = "") -> str:
     """The footer's value text, or "" when the bar has nothing to say and
     should be deleted. A populated capital_stack always wins -- this is a
-    fallback, not a replacement."""
+    fallback, not a replacement.
+
+    The subcategory goes through subcategory_display(), so the bar carries
+    "Real Estate · Fund operations and back-office finance" rather than the
+    classifier's own "Fund Operations/Back Office"."""
     if str(capital_stack or "").strip():
         return ""
-    parts = [p for p in ((category or "").strip(), (subcategory or "").strip()) if p]
+    parts = [p for p in ((category or "").strip(), subcategory_display(subcategory)) if p]
     return _FOOTER_SEPARATOR.join(parts)
 
 

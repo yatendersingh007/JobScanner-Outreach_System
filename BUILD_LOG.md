@@ -2694,3 +2694,88 @@ top-up.
 behaviour were removed (that behaviour no longer exists); the guards themselves
 are still unit-tested. No vendored `.py` file touched. No scan command run.
 
+
+## Drop the duplicate focus bullet, and de-jargon the footer's subcategory - 2026-08-12
+
+### 1. The `Focus: {subcategory}` bullet is gone
+
+The navy footer already carries the focus and carries it better, since it adds
+the category. `compose_profile_bullets` no longer emits the bullet;
+`category`/`subcategory` are still accepted so its signature matches the
+footer's and callers pass one set of arguments.
+
+While removing it, the function was restructured from one list plus a computed
+insert index into four explicit bands (founding, location, figures, domain).
+Same declared order, but readable, and it fixes where a floor top-up lands: the
+old index arithmetic put the AUM basis line AHEAD of the reported event, and
+the event is the more interesting line. Top-ups now join the END of the figures
+band.
+
+Live effect, both rows regenerated and read back from `slide3.xml`:
+
+- **Choice NY**: 3 lines without the focus bullet, so the floor pulls in the
+  AUM basis. `Operates in New York metropolitan area` / `Reported: Sold to
+  Associa Corp. in 2021 (earn-out noted)` / `AUM basis: $250 million (assets
+  valued)` / `choicenewyork.com`. Exactly the behaviour predicted when this was
+  flagged last commit.
+- **Neal**: founding, location, event, domain -- exactly four, so neither
+  top-up fires even though it has an AUM figure to offer. Went from five
+  bullets to four.
+
+### 2. Subcategory display labels
+
+Subcategory values key the title-matching rule lists in
+`classifier_rules.yaml`. They are routing labels for our own triage, and
+`Fund Operations/Back Office` reads as our jargon on a deck the prospect
+opens. `subcategory_display()` maps each to a phrase written for that reader,
+and `footer_focus_text()` runs the subcategory through it.
+
+All 8 names declared in the YAML are covered (Real Estate's seven plus Family
+Office's three, overlapping on Investor Relations and Fund Operations/Back
+Office):
+
+| raw value | footer label |
+|---|---|
+| `Property Accounting` | Property accounting |
+| `Fund Operations/Back Office` | Fund operations and back-office finance |
+| `Investment Analyst/Underwriting` | Acquisitions and underwriting |
+| `Fund Accountant` | Fund accounting |
+| `Staff Accountant` | General accounting and controllership |
+| `Asset Analyst` | Asset management |
+| `Investor Relations` | Investor relations and reporting |
+| `Accounts Payable` | Accounts payable |
+
+Matching is case- and whitespace-insensitive on the raw value. Anything
+unmapped falls back to the raw value verbatim, so a subcategory added to the
+YAML later degrades to today's behaviour rather than vanishing from the bar.
+
+**`Needs Review` maps to `""` on purpose.** The classifier assigns it when a
+title matches none of its category's rules, so it means "not decided", not a
+focus. Printing it would leak triage language; inventing a specific focus in
+its place would be worse. The footer shows the category alone (`Real Estate`).
+It is a live case, not hypothetical: it is the subcategory for every posting in
+category `Other`, and a target-category firm whose title matched no rule
+carries it too.
+
+A test reads `classifier_rules.yaml` itself and asserts the declared set
+equals the mapped set, so adding a subcategory there without a label fails the
+suite instead of shipping internal taxonomy to a prospect. Another asserts no
+mapped label contains a `/`, the tell that the raw taxonomy escaped.
+
+Note the 8 `wd_firms` rows (3 of them qualified) with a blank
+category/subcategory are unaffected: `footer_focus_text` returns `""` for them
+and the bar is deleted, as before.
+
+### Verified
+
+Both decks regenerated and slide 01 read back from the XML: no `Focus:` bullet
+in `Text 3`, no occurrence of `Fund Operations/Back Office` or `Needs Review`
+anywhere in the slide, and the footer reading `Focus: ` + `Real Estate ·
+Property accounting` / `Real Estate · Fund operations and back-office finance`
+in the master's own label/value run styling. Rendered both to PDF and looked at
+them: four bullets each, tiles populated, footer populated, no repetition.
+
+680 tests pass, up from 661. Twelve existing expectations were updated for the
+removed bullet, the new top-up ordering and the display labels. No vendored
+`.py` file touched. No scan command run.
+

@@ -2042,9 +2042,14 @@ def test_compose_domain_falls_back_to_domain_when_own_domain_is_missing():
     assert sd.compose_profile_bullets({"domain": "example.com"})[0] == "example.com"
 
 
-def test_compose_subcategory_field():
-    assert sd.compose_profile_bullets({}, "Real Estate", "Property Accounting") == [
-        "Focus: Property Accounting"]
+def test_compose_emits_no_focus_bullet():
+    """The navy footer carries the focus, and carries it better (it adds the
+    category). Showing both put the same phrase on the slide twice."""
+    assert sd.compose_profile_bullets({}, "Real Estate", "Property Accounting") == []
+
+    bullets = sd.compose_profile_bullets(_N_RESEARCH, "Real Estate", "Fund Operations/Back Office")
+    assert not any(b.startswith("Focus:") for b in bullets)
+    assert not any("Fund Operations/Back Office" in b for b in bullets)
 
 
 def test_compose_recent_event_gets_a_lead_in_when_not_a_sentence():
@@ -2103,29 +2108,29 @@ def test_compose_never_paraphrases_a_field_value():
 
 
 # --- declared order -------------------------------------------------------
-def test_compose_order_is_founding_location_figures_focus_domain():
+def test_compose_order_is_founding_location_figures_domain():
     bullets = sd.compose_profile_bullets(_N_RESEARCH, "Real Estate", "Fund Operations/Back Office")
 
     assert bullets == [
         "Founded in 1970",
         "Operates in Southwest Florida (Sarasota/Lakewood Ranch), US",
         "Reported: Article noting $1 billion annual revenue (Business Observer, Apr 2024)",
-        "Focus: Fund Operations/Back Office",
         "nealcommunities.com",
     ]
 
 
 def test_compose_live_choice_ny_row():
-    """No founded_year, so four bullets -- exactly at the floor, no top-ups."""
+    """No founded_year and no focus bullet leaves three lines, so the floor
+    pulls in the AUM basis -- at the END of the figures band, after the
+    reported event."""
     bullets = sd.compose_profile_bullets(_C_RESEARCH, "Real Estate", "Property Accounting")
 
     assert bullets == [
         "Operates in New York metropolitan area",
         "Reported: Sold to Associa Corp. in 2021 (earn-out noted)",
-        "Focus: Property Accounting",
+        "AUM basis: $250 million (assets valued)",
         "choicenewyork.com",
     ]
-    assert not any(b.startswith("AUM basis:") for b in bullets)
 
 
 # --- bullet-count floor ---------------------------------------------------
@@ -2133,14 +2138,14 @@ def test_floor_adds_the_aum_basis_line_when_short():
     """Two fields only -> below the floor -> the AUM basis is added, in the
     scale/figures band (after location, before focus)."""
     research = {"geography": "Austin, TX", "aum_display": "$400 million (AUM)",
-                "own_domain": "example.com"}
+                "own_domain": "example.com", "founded_year": "1998"}
 
     bullets = sd.compose_profile_bullets(research, "Real Estate", "Property Accounting")
 
     assert bullets == [
+        "Founded in 1998",
         "Operates in Austin, TX",
         "AUM basis: $400 million (AUM)",
-        "Focus: Property Accounting",
         "example.com",
     ]
 
@@ -2164,14 +2169,22 @@ def test_floor_aum_basis_builds_from_disclosed_fields_when_display_is_empty():
 
 
 def test_floor_adds_a_client_safe_icp_reason():
-    research = {"geography": "Austin, TX", "own_domain": "example.com"}
+    """Both top-ups can fire: the AUM basis first, then the gate reason, and
+    only while the floor is still unmet."""
+    research = {"geography": "Austin, TX", "own_domain": "example.com",
+               "aum_display": "$400 million (AUM)"}
 
     bullets = sd.compose_profile_bullets(
         research, "Real Estate", "Property Accounting",
         icp_reason="Operator-verified portfolio of 4,000 apartment units")
 
-    assert "Operator-verified portfolio of 4,000 apartment units" in bullets
-    assert len(bullets) >= sd._BULLET_FLOOR
+    assert bullets == [
+        "Operates in Austin, TX",
+        "AUM basis: $400 million (AUM)",
+        "Operator-verified portfolio of 4,000 apartment units",
+        "example.com",
+    ]
+    assert len(bullets) == sd._BULLET_FLOOR
 
 
 @pytest.mark.parametrize("reason", [
@@ -2199,16 +2212,18 @@ def test_floor_never_pads_with_filler():
 
 
 def test_floor_does_not_top_up_once_it_is_met():
+    """Neal has founding, location, event and domain -- exactly four, so
+    neither top-up fires even though it has an AUM figure to offer."""
     bullets = sd.compose_profile_bullets(_N_RESEARCH, "Real Estate", "Fund Operations/Back Office")
 
-    assert len(bullets) == 5
+    assert len(bullets) == sd._BULLET_FLOOR
     assert not any(b.startswith("AUM basis:") for b in bullets)
 
 
 # --- navy footer fallback -------------------------------------------------
 def test_footer_falls_back_to_category_and_subcategory():
     assert sd.footer_focus_text("", "Real Estate", "Property Accounting") == \
-        "Real Estate · Property Accounting"
+        "Real Estate · Property accounting"
 
 
 def test_footer_keeps_a_real_capital_stack():
@@ -2218,7 +2233,7 @@ def test_footer_keeps_a_real_capital_stack():
 
 @pytest.mark.parametrize("category,subcategory,expected", [
     ("Real Estate", "", "Real Estate"),
-    ("", "Property Accounting", "Property Accounting"),
+    ("", "Property Accounting", "Property accounting"),
     ("", "", ""),
 ])
 def test_footer_with_only_one_side_populated(category, subcategory, expected):
@@ -2242,7 +2257,7 @@ def test_footer_bar_is_written_not_deleted_when_focus_is_available(tmp_path):
     assert "Shape 12" in names and "Text 13" in names
     with zipfile.ZipFile(path) as z:
         slide = z.read("ppt/slides/slide3.xml").decode("utf-8")
-    assert f"Real Estate{sd._FOOTER_SEPARATOR}Property Accounting" in slide
+    assert f"Real Estate{sd._FOOTER_SEPARATOR}Property accounting" in slide
 
 
 def test_footer_bar_is_still_deleted_when_everything_is_empty(tmp_path):
@@ -2312,7 +2327,6 @@ def test_generate_deck_discards_the_models_profile_bullets(monkeypatch):
         "Founded in 1970",
         "Operates in Southwest Florida (Sarasota/Lakewood Ranch), US",
         "Reported: Article noting $1 billion annual revenue (Business Observer, Apr 2024)",
-        "Focus: Fund Operations/Back Office",
         "nealcommunities.com",
     ]
     # not one word of the model's bullets survived
@@ -2342,7 +2356,7 @@ def test_generate_deck_composes_bullets_even_when_the_model_returns_none(monkeyp
     assert seen["bullets"] == [
         "Operates in New York metropolitan area",
         "Reported: Sold to Associa Corp. in 2021 (earn-out noted)",
-        "Focus: Property Accounting",
+        "AUM basis: $250 million (assets valued)",
         "choicenewyork.com",
     ]
 
@@ -2360,5 +2374,92 @@ def test_generate_deck_reports_the_composed_bullet_count(monkeypatch):
     sd._generate_deck("Neal", _N_RESEARCH, progress=progressed.append,
                       category="Real Estate", subcategory="Fund Operations/Back Office")
 
-    assert any("composed 5 bullet(s) from research fields" in m for m in progressed)
+    assert any("composed 4 bullet(s) from research fields" in m for m in progressed)
+
+
+
+# ---------------------------------------------------------------------------
+# subcategory_display: classifier taxonomy -> prospect-facing phrase.
+#
+# Subcategory values key the title-matching rule lists in
+# classifier_rules.yaml. "Fund Operations/Back Office" is a routing label for
+# our own triage; on a deck the prospect reads, it is our jargon.
+# ---------------------------------------------------------------------------
+_EXPECTED_SUBCATEGORY_LABELS = {
+    "Property Accounting": "Property accounting",
+    "Fund Operations/Back Office": "Fund operations and back-office finance",
+    "Investment Analyst/Underwriting": "Acquisitions and underwriting",
+    "Fund Accountant": "Fund accounting",
+    "Staff Accountant": "General accounting and controllership",
+    "Asset Analyst": "Asset management",
+    "Investor Relations": "Investor relations and reporting",
+    "Accounts Payable": "Accounts payable",
+}
+
+
+@pytest.mark.parametrize("raw,expected", sorted(_EXPECTED_SUBCATEGORY_LABELS.items()))
+def test_subcategory_display_label(raw, expected):
+    assert sd.subcategory_display(raw) == expected
+
+
+def test_subcategory_display_covers_every_name_in_classifier_rules():
+    """The map must not fall behind the YAML. Reads the real rules file rather
+    than a copy of the list, so adding a subcategory there and forgetting the
+    label fails here instead of shipping internal taxonomy to a prospect."""
+    import pathlib
+
+    import yaml
+
+    text = pathlib.Path(__file__).resolve().parents[1].joinpath(
+        "classifier_rules.yaml").read_text(encoding="utf-8")
+    rules = yaml.safe_load(text)
+    declared = {r["name"] for group in rules["subcategories"].values() for r in group}
+
+    assert declared == set(_EXPECTED_SUBCATEGORY_LABELS)
+    unmapped = [name for name in declared if name.lower() not in sd._SUBCATEGORY_DISPLAY]
+    assert unmapped == []
+
+
+def test_subcategory_display_omits_the_needs_review_triage_state():
+    """"Needs Review" is what the classifier assigns when a title matches none
+    of its category's rules -- it means "not decided", not a focus. Printing it
+    or inventing a focus in its place would both be worse than showing the
+    category alone."""
+    assert sd.subcategory_display("Needs Review") == ""
+    assert sd.footer_focus_text("", "Real Estate", "Needs Review") == "Real Estate"
+
+
+def test_subcategory_display_falls_back_to_the_raw_value_when_unmapped():
+    """A subcategory added to the YAML without a label here degrades to
+    today's behaviour rather than disappearing from the footer."""
+    assert sd.subcategory_display("Some New Bucket") == "Some New Bucket"
+    assert sd.footer_focus_text("", "Real Estate", "Some New Bucket") == \
+        f"Real Estate{sd._FOOTER_SEPARATOR}Some New Bucket"
+
+
+@pytest.mark.parametrize("raw", [
+    "property accounting", "PROPERTY ACCOUNTING", "  Property Accounting  ",
+])
+def test_subcategory_display_is_case_and_whitespace_insensitive(raw):
+    assert sd.subcategory_display(raw) == "Property accounting"
+
+
+@pytest.mark.parametrize("raw", ["", None, "   "])
+def test_subcategory_display_handles_an_absent_value(raw):
+    assert sd.subcategory_display(raw) == ""
+
+
+def test_no_label_leaks_classifier_punctuation():
+    """None of the mapped phrases may carry the slash-joined shape of the raw
+    taxonomy, which is the tell that internal wording escaped."""
+    for label in _EXPECTED_SUBCATEGORY_LABELS.values():
+        assert "/" not in label
+
+
+def test_footer_uses_the_display_label_on_the_live_rows():
+    """Both live wd_firms rows, end to end through the footer."""
+    assert sd.footer_focus_text("", "Real Estate", "Fund Operations/Back Office") == \
+        f"Real Estate{sd._FOOTER_SEPARATOR}Fund operations and back-office finance"
+    assert sd.footer_focus_text("", "Real Estate", "Property Accounting") == \
+        f"Real Estate{sd._FOOTER_SEPARATOR}Property accounting"
 
