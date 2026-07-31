@@ -99,11 +99,6 @@ title_exclude_patterns:
 
 connectors:
 
-# Aggregator ON — JSearch (RapidAPI) indexes Google for Jobs, which carries
-  # LinkedIn, Indeed, ZipRecruiter, Glassdoor, Monster and thousands more.
-  # API calls per run = (queries) x (countries). 20 x 1 = 20 calls.
-  # Basic tier is a 200/month HARD limit, so 10 runs. Track them manually:
-  # the connector has no call counter and will 403 mid-scan when the cap hits.
   aggregator:
     enabled: true
     provider: jsearch
@@ -128,7 +123,7 @@ connectors:
       - fund administrator
       - accounts receivable
       - family office accountant
-      - Investment analyst
+      - treasury analyst
       - tax accountant
   # ATS feeds — free, no key. ats: greenhouse|lever|ashby|workable|
   # smartrecruiters|workday. For workday, token = the careers-page URL.
@@ -155,31 +150,31 @@ connectors:
   # none of them bind against this list; they exist to bound wall-clock as
   # this list grows later, not to constrain it today.
   tinyfish:
-    enabled: false
+    enabled: true
     targets:
       # ── LinkedIn: full 11-role coverage, US then CA per role ──
       - { name: "LinkedIn US - Property Accountant",           url: "https://www.linkedin.com/jobs/search?keywords=Property%20Accountant&location=United%20States&f_TPR=r86400" }
-      - { name: "LinkedIn Canada - Property Accountant",       url: "https://www.linkedin.com/jobs/search?keywords=Property%20Accountant&location=Canada&f_TPR=r86400" }
+      # - { name: "LinkedIn Canada - Property Accountant",       url: "https://www.linkedin.com/jobs/search?keywords=Property%20Accountant&location=Canada&f_TPR=r86400" }
       - { name: "LinkedIn US - Fund Accountant",               url: "https://www.linkedin.com/jobs/search?keywords=Fund%20Accountant&location=United%20States&f_TPR=r86400" }
-      - { name: "LinkedIn Canada - Fund Accountant",           url: "https://www.linkedin.com/jobs/search?keywords=Fund%20Accountant&location=Canada&f_TPR=r86400" }
+      # - { name: "LinkedIn Canada - Fund Accountant",           url: "https://www.linkedin.com/jobs/search?keywords=Fund%20Accountant&location=Canada&f_TPR=r86400" }
       - { name: "LinkedIn US - Controller",                    url: "https://www.linkedin.com/jobs/search?keywords=Controller&location=United%20States&f_TPR=r86400" }
-      - { name: "LinkedIn Canada - Controller",                url: "https://www.linkedin.com/jobs/search?keywords=Controller&location=Canada&f_TPR=r86400" }
+      # - { name: "LinkedIn Canada - Controller",                url: "https://www.linkedin.com/jobs/search?keywords=Controller&location=Canada&f_TPR=r86400" }
       - { name: "LinkedIn US - Assistant Controller",          url: "https://www.linkedin.com/jobs/search?keywords=Assistant%20Controller&location=United%20States&f_TPR=r86400" }
-      - { name: "LinkedIn Canada - Assistant Controller",      url: "https://www.linkedin.com/jobs/search?keywords=Assistant%20Controller&location=Canada&f_TPR=r86400" }
+      # - { name: "LinkedIn Canada - Assistant Controller",      url: "https://www.linkedin.com/jobs/search?keywords=Assistant%20Controller&location=Canada&f_TPR=r86400" }
       - { name: "LinkedIn US - Real Estate Accountant",        url: "https://www.linkedin.com/jobs/search?keywords=Real%20Estate%20Accountant&location=United%20States&f_TPR=r86400" }
-      - { name: "LinkedIn Canada - Real Estate Accountant",    url: "https://www.linkedin.com/jobs/search?keywords=Real%20Estate%20Accountant&location=Canada&f_TPR=r86400" }
+      # - { name: "LinkedIn Canada - Real Estate Accountant",    url: "https://www.linkedin.com/jobs/search?keywords=Real%20Estate%20Accountant&location=Canada&f_TPR=r86400" }
       - { name: "LinkedIn US - CAM Analyst",                   url: "https://www.linkedin.com/jobs/search?keywords=CAM%20Analyst&location=United%20States&f_TPR=r86400" }
-      - { name: "LinkedIn Canada - CAM Analyst",               url: "https://www.linkedin.com/jobs/search?keywords=CAM%20Analyst&location=Canada&f_TPR=r86400" }
+      # - { name: "LinkedIn Canada - CAM Analyst",               url: "https://www.linkedin.com/jobs/search?keywords=CAM%20Analyst&location=Canada&f_TPR=r86400" }
       - { name: "LinkedIn US - Lease Administrator",           url: "https://www.linkedin.com/jobs/search?keywords=Lease%20Administrator&location=United%20States&f_TPR=r86400" }
-      - { name: "LinkedIn Canada - Lease Administrator",       url: "https://www.linkedin.com/jobs/search?keywords=Lease%20Administrator&location=Canada&f_TPR=r86400" }
+      # - { name: "LinkedIn Canada - Lease Administrator",       url: "https://www.linkedin.com/jobs/search?keywords=Lease%20Administrator&location=Canada&f_TPR=r86400" }
       - { name: "LinkedIn US - Lease Analyst",                 url: "https://www.linkedin.com/jobs/search?keywords=Lease%20Analyst&location=United%20States&f_TPR=r86400" }
-      - { name: "LinkedIn Canada - Lease Analyst",             url: "https://www.linkedin.com/jobs/search?keywords=Lease%20Analyst&location=Canada&f_TPR=r86400" }
+      # - { name: "LinkedIn Canada - Lease Analyst",             url: "https://www.linkedin.com/jobs/search?keywords=Lease%20Analyst&location=Canada&f_TPR=r86400" }
       - { name: "LinkedIn US - Accounting Manager",            url: "https://www.linkedin.com/jobs/search?keywords=Accounting%20Manager&location=United%20States&f_TPR=r86400" }
-      - { name: "LinkedIn Canada - Accounting Manager",        url: "https://www.linkedin.com/jobs/search?keywords=Accounting%20Manager&location=Canada&f_TPR=r86400" }
+      # - { name: "LinkedIn Canada - Accounting Manager",        url: "https://www.linkedin.com/jobs/search?keywords=Accounting%20Manager&location=Canada&f_TPR=r86400" }
       - { name: "LinkedIn US - Acquisitions Analyst",          url: "https://www.linkedin.com/jobs/search?keywords=Acquisitions%20Analyst&location=United%20States&f_TPR=r86400" }
-      - { name: "LinkedIn Canada - Acquisitions Analyst",      url: "https://www.linkedin.com/jobs/search?keywords=Acquisitions%20Analyst&location=Canada&f_TPR=r86400" }
+      # - { name: "LinkedIn Canada - Acquisitions Analyst",      url: "https://www.linkedin.com/jobs/search?keywords=Acquisitions%20Analyst&location=Canada&f_TPR=r86400" }
       - { name: "LinkedIn US - Asset Management Analyst",      url: "https://www.linkedin.com/jobs/search?keywords=Asset%20Management%20Analyst&location=United%20States&f_TPR=r86400" }
-      - { name: "LinkedIn Canada - Asset Management Analyst",  url: "https://www.linkedin.com/jobs/search?keywords=Asset%20Management%20Analyst&location=Canada&f_TPR=r86400" }
+      # - { name: "LinkedIn Canada - Asset Management Analyst",  url: "https://www.linkedin.com/jobs/search?keywords=Asset%20Management%20Analyst&location=Canada&f_TPR=r86400" }
       # ── SelectLeaders: top 4 roles. No 24h URL filter available (verified
       # keywords= search box, not a category slug), so the pipeline's
       # recency filter (+ first-seen grace) does the cutting, same as before. ──
