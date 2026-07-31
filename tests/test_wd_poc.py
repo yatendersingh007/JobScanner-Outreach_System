@@ -27,6 +27,21 @@ Three things under adversarial test here:
    "controller" is IN "assistant controller"), so a naive scan could pick
    whichever one Apollo happened to list first when both exist at the same
    firm.
+4. The executive tier (Principal, Founder, President, CEO, COO, Partner,
+   ...) added 2026-08-02: outranks the SVP/VP-of-Finance/Accounting tier,
+   which outranks Controller, which outranks Assistant Controller -- and
+   five substring collisions this surfaced (three named live, two found by
+   this file's own exhaustive pairwise check): "partner" must not catch
+   "Partnership Accountant" or "Finance Business Partner"; "president"
+   must not catch "Vice President of Finance" or "Senior Vice President of
+   Accounting"; "principal" must not catch "Principal Accountant";
+   "managing director" must not catch "Managing Director of
+   Accounting"/"...of Finance" (these correctly fall through to their own,
+   already-existing lower tiers instead of vanishing).
+5. find_senior_poc walks every ranked candidate (not just the top one),
+   calling people/match until one comes back verified, capped at
+   MAX_MATCH_ATTEMPTS -- an unverified top candidate no longer kills the
+   whole search when a verified one exists further down the ranking.
 
 No network: _search and the final requests.post (people/match) are
 monkeypatched directly. lib_referral/ and lib_snapshot/ are read, never
@@ -64,6 +79,32 @@ def _mock_match(monkeypatch, name, email, status="verified"):
         return _FakeMatchResponse(200, {"person": {"name": name, "email": email,
                                                     "email_status": status}})
     monkeypatch.setattr(wd_poc.requests, "post", fake_post)
+
+
+def _mock_match_by_id(monkeypatch, responses: dict):
+    """Like _mock_match, but keyed by candidate id -- needed to test
+    find_senior_poc's multi-candidate walk, where different candidates
+    must get different match outcomes. responses maps id -> either an int
+    (HTTP status code, for a failed call) or a (name, email, status)
+    3-tuple (for a 200 response). Records every id posted, in call order,
+    on the returned fake's .calls, so a test can assert exactly how many
+    attempts were made and in what order."""
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        assert url == wd_poc.MATCH_URL
+        pid = json["id"]
+        calls.append(pid)
+        resp = responses[pid]
+        if isinstance(resp, int):
+            return _FakeMatchResponse(resp, {})
+        name, email, status = resp
+        return _FakeMatchResponse(200, {"person": {"name": name, "email": email,
+                                                    "email_status": status}})
+
+    fake_post.calls = calls
+    monkeypatch.setattr(wd_poc.requests, "post", fake_post)
+    return fake_post
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +288,159 @@ def test_title_matches_keyword_controller_excludes_assistant():
 
 
 # ---------------------------------------------------------------------------
+# TIERS extension 2026-08-02: executive tier (no-CFO economic buyer) and
+# the seniority chain it has to fit into: CFO > Executive > SVP/VP of
+# Finance-and-Accounting > Controller.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("title", [
+    "Principal",
+    "Founder",
+    "Co-Founder",
+    "Owner",
+    "Managing Partner",
+    "Managing Director",
+    "President",
+    "Chief Executive Officer",
+    "CEO",
+    "Chief Operating Officer",
+    "COO",
+    "Partner",
+])
+def test_rank_recognizes_new_executive_titles_with_no_cfo_present(title):
+    people = [_person("a", title, FIRM)]
+    hit = wd_poc._rank(people, FIRM)
+    assert hit is not None
+    assert hit["title"] == title
+
+
+def test_cfo_outranks_principal():
+    people = [_person("p", "Principal", FIRM), _person("c", "Chief Financial Officer", FIRM)]
+    assert wd_poc._rank(people, FIRM)["title"] == "Chief Financial Officer"
+
+
+def test_principal_outranks_svp_of_accounting():
+    people = [_person("s", "SVP of Accounting", FIRM), _person("p", "Principal", FIRM)]
+    assert wd_poc._rank(people, FIRM)["title"] == "Principal"
+
+
+def test_svp_of_accounting_outranks_controller():
+    people = [_person("c", "Controller", FIRM), _person("s", "SVP of Accounting", FIRM)]
+    assert wd_poc._rank(people, FIRM)["title"] == "SVP of Accounting"
+
+
+# Live-named collisions: adding the executive tier's keywords must not
+# reach into titles that belong to other, already-established tiers.
+def test_title_matches_keyword_partner_excludes_partnership_accountant():
+    assert wd_poc._title_matches_keyword("partnership accountant", "partner") is False
+    assert wd_poc._title_matches_keyword("partner", "partner") is True
+    assert wd_poc._title_matches_keyword("managing partner", "partner") is True
+
+
+def test_title_matches_keyword_president_excludes_vice_president_titles():
+    assert wd_poc._title_matches_keyword("vice president of finance", "president") is False
+    assert wd_poc._title_matches_keyword("senior vice president of accounting", "president") is False
+    assert wd_poc._title_matches_keyword("president", "president") is True
+
+
+def test_title_matches_keyword_principal_excludes_principal_accountant():
+    assert wd_poc._title_matches_keyword("principal accountant", "principal") is False
+    assert wd_poc._title_matches_keyword("principal", "principal") is True
+
+
+# Self-found during the exhaustive pairwise check, same shape of problem as
+# the three named above, not explicitly called out but real collisions.
+def test_title_matches_keyword_managing_director_excludes_function_scoped_roles():
+    assert wd_poc._title_matches_keyword("managing director of accounting", "managing director") is False
+    assert wd_poc._title_matches_keyword("managing director of finance", "managing director") is False
+    assert wd_poc._title_matches_keyword("managing director", "managing director") is True
+
+
+def test_title_matches_keyword_partner_excludes_finance_business_partner():
+    assert wd_poc._title_matches_keyword("finance business partner", "partner") is False
+
+
+@pytest.mark.parametrize("colliding_title", [
+    "Partnership Accountant",
+    "Principal Accountant",
+    "Finance Business Partner",
+])
+def test_rank_collisions_never_land_in_the_executive_tier(colliding_title):
+    """None of these are recognized senior-finance titles in any tier, so a
+    solo candidate with one of these titles must not rank at all -- if any
+    of them wrongly matched the executive tier, this candidate would come
+    back as a hit instead of None."""
+    people = [_person("a", colliding_title, FIRM)]
+    assert wd_poc._rank(people, FIRM) is None
+
+
+@pytest.mark.parametrize("colliding_title", [
+    "Vice President of Finance",
+    "Senior Vice President of Accounting",
+])
+def test_rank_vice_president_titles_land_in_svp_vp_tier_not_executive(colliding_title):
+    """These DO belong to the existing SVP/VP-of-Finance tier -- confirm
+    they still rank there (not swallowed by the executive tier's
+    "president" keyword, and not dropped entirely) by checking a real
+    executive still outranks them."""
+    people = [_person("a", colliding_title, FIRM), _person("b", "Principal", FIRM)]
+    assert wd_poc._rank(people, FIRM)["title"] == "Principal"
+    solo = [_person("a", colliding_title, FIRM)]
+    assert wd_poc._rank(solo, FIRM)["title"] == colliding_title
+
+
+def test_rank_managing_director_of_accounting_falls_through_to_accounting_tier():
+    people = [_person("a", "Managing Director of Accounting", FIRM),
+             _person("b", "Chief Financial Officer", FIRM)]
+    assert wd_poc._rank(people, FIRM)["title"] == "Chief Financial Officer"
+    solo = [_person("a", "Managing Director of Accounting", FIRM)]
+    assert wd_poc._rank(solo, FIRM)["title"] == "Managing Director of Accounting"
+
+
+def test_rank_managing_director_of_finance_falls_through_to_svp_vp_tier():
+    people = [_person("a", "Managing Director of Finance", FIRM),
+             _person("b", "Principal", FIRM)]
+    assert wd_poc._rank(people, FIRM)["title"] == "Principal"
+
+
+# ---------------------------------------------------------------------------
+# _rank_all / _rank: _rank is a thin wrapper over _rank_all's first result
+# ---------------------------------------------------------------------------
+def test_rank_all_returns_every_matching_candidate_in_seniority_order():
+    people = [
+        _person("Ann Manager", "Accounting Manager", FIRM),
+        _person("Ben CFO", "Chief Financial Officer", FIRM),
+        _person("Cara Controller", "Controller", FIRM),
+    ]
+    ranked = wd_poc._rank_all(people, FIRM)
+    assert [p["title"] for p in ranked] == [
+        "Chief Financial Officer", "Controller", "Accounting Manager",
+    ]
+
+
+def test_rank_all_excludes_non_matching_org():
+    people = [_person("Jane CFO", "Chief Financial Officer", "Wasatch Group")]
+    assert wd_poc._rank_all(people, "Wasatch Bridge Capital Group") == []
+
+
+def test_rank_all_deduplicates_by_id():
+    people = [_person("Ben CFO", "Chief Financial Officer", FIRM, person_id="p1"),
+             _person("Ben CFO", "Chief Financial Officer", FIRM, person_id="p1")]
+    assert len(wd_poc._rank_all(people, FIRM)) == 1
+
+
+def test_rank_is_a_thin_wrapper_over_rank_all_first_result():
+    people = [
+        _person("Ann Manager", "Accounting Manager", FIRM),
+        _person("Ben CFO", "Chief Financial Officer", FIRM),
+    ]
+    assert wd_poc._rank(people, FIRM) == wd_poc._rank_all(people, FIRM)[0]
+
+
+def test_rank_returns_none_when_rank_all_is_empty():
+    assert wd_poc._rank([], FIRM) is None
+
+
+# ---------------------------------------------------------------------------
 # find_senior_poc: domain-first search order, name as fallback
 # ---------------------------------------------------------------------------
 def test_domain_search_tried_first_and_wins_when_it_finds_a_hit(monkeypatch):
@@ -348,3 +542,78 @@ def test_no_hit_anywhere_returns_none_and_reports_combined_count(monkeypatch):
 
     assert result is None
     assert any("5 people seen" in msg for msg in progressed)
+
+
+# ---------------------------------------------------------------------------
+# find_senior_poc: walks every ranked candidate, not just the top one
+# ---------------------------------------------------------------------------
+def test_find_senior_poc_falls_through_unverified_first_candidate_to_verified_second(monkeypatch):
+    people = [
+        _person("Dana CFO", "Chief Financial Officer", FIRM, person_id="p1"),
+        _person("Alex Principal", "Principal", FIRM, person_id="p2"),
+    ]
+    monkeypatch.setattr(wd_poc, "_search", lambda headers, body: people)
+    fake_post = _mock_match_by_id(monkeypatch, {
+        "p1": ("Dana CFO", "dana@acme.example", "unverified"),
+        "p2": ("Alex Principal", "alex@acme.example", "verified"),
+    })
+
+    result = wd_poc.find_senior_poc(FIRM, domain="acme.example")
+
+    assert result == ("Alex Principal", "alex@acme.example", "Principal")
+    assert fake_post.calls == ["p1", "p2"]
+
+
+def test_find_senior_poc_logs_each_rejected_candidate(monkeypatch):
+    people = [
+        _person("Dana CFO", "Chief Financial Officer", FIRM, person_id="p1"),
+        _person("Alex Principal", "Principal", FIRM, person_id="p2"),
+    ]
+    monkeypatch.setattr(wd_poc, "_search", lambda headers, body: people)
+    _mock_match_by_id(monkeypatch, {
+        "p1": ("Dana CFO", "dana@acme.example", "unverified"),
+        "p2": ("Alex Principal", "alex@acme.example", "verified"),
+    })
+    progressed = []
+
+    wd_poc.find_senior_poc(FIRM, domain="acme.example", progress=progressed.append)
+
+    assert any("Dana CFO (Chief Financial Officer): email_status=unverified" in msg
+              for msg in progressed)
+
+
+def test_find_senior_poc_all_unverified_returns_none(monkeypatch):
+    people = [
+        _person("Dana CFO", "Chief Financial Officer", FIRM, person_id="p1"),
+        _person("Alex Principal", "Principal", FIRM, person_id="p2"),
+    ]
+    monkeypatch.setattr(wd_poc, "_search", lambda headers, body: people)
+    fake_post = _mock_match_by_id(monkeypatch, {
+        "p1": ("Dana CFO", "dana@acme.example", "unverified"),
+        "p2": ("Alex Principal", "alex@acme.example", "guessed"),
+    })
+
+    result = wd_poc.find_senior_poc(FIRM, domain="acme.example")
+
+    assert result is None
+    assert fake_post.calls == ["p1", "p2"]
+
+
+def test_find_senior_poc_caps_match_attempts_at_five(monkeypatch):
+    # All same-tier (executive) so seniority ties break on input order,
+    # giving deterministic attempt order p0..p5.
+    titles = ["Principal", "Founder", "Co-Founder", "Owner", "Managing Partner", "President"]
+    people = [_person(f"Person {i}", title, FIRM, person_id=f"p{i}")
+             for i, title in enumerate(titles)]
+    monkeypatch.setattr(wd_poc, "_search", lambda headers, body: people)
+
+    responses = {f"p{i}": (f"Person {i}", f"person{i}@acme.example", "unverified")
+                for i in range(6)}
+    responses["p5"] = ("Person 5", "person5@acme.example", "verified")  # 6th, never tried
+    fake_post = _mock_match_by_id(monkeypatch, responses)
+
+    result = wd_poc.find_senior_poc(FIRM, domain="acme.example")
+
+    assert result is None
+    assert fake_post.calls == ["p0", "p1", "p2", "p3", "p4"]
+    assert len(fake_post.calls) == wd_poc.MAX_MATCH_ATTEMPTS

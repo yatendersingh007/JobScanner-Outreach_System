@@ -55,6 +55,39 @@ strip step but loosening equality to containment) would have reopened
 that exact collision, since "Kairos Real Estate Partners" and "Kairos
 Investment Management" both reduce to bare {"kairos"} once SUFFIX_TOKENS
 is fully stripped -- trivially "equal", let alone a subset.
+
+2026-08-02, live evidence TIERS had no executive tier: at "Choice New
+York Companies", Apollo returned a Principal (Damien Stein, verified
+email) and a Chief Operating Officer -- _rank skipped both (no keyword
+anywhere in TIERS matched either title) and fell all the way through to
+Controller. The ICP model requires reaching an economic buyer, and at a
+firm with no CFO the Principal/Founder/President IS that buyer, more so
+than a Controller. Added an executive tier immediately after CFO and
+before the SVP/VP-of-Finance-and-Accounting tier -- which in turn had to
+move above Controller too, since a Principal must outrank a full SVP of
+Accounting, and a full SVP of Accounting already outranks a plain
+Controller (see TIERS).
+
+Adding it surfaced real substring collisions the same shape as the
+assistant-controller one before it -- "partner" is a substring of
+"Partnership Accountant", "president" is a substring of "Vice President
+of Finance" and "Senior Vice President of Accounting", "principal" is a
+substring of "Principal Accountant". Verified pairwise across every tier
+combination before finalizing (not just the three named cases): also
+found "managing director" wrongly catching "Managing Director of
+Accounting"/"...of Finance" (function-scoped roles that belong in the
+existing Accounting/Finance-family tiers, not the executive tier) and
+"partner" wrongly catching "Finance Business Partner" (a real,
+commonly-used finance title where "partner" means "business partnering,"
+not equity partnership) -- both fixed the same way, via
+_KEYWORD_EXCLUSIONS.
+
+Also replaced _rank (single result) with _rank_all (every firm-matching
+candidate, seniority-ordered) -- find_senior_poc previously gave up
+entirely the moment ITS ONE candidate's verified-email check failed,
+even when a lower-ranked but still-relevant candidate existed and would
+have resolved. _rank is kept as a thin wrapper over _rank_all's first
+result, in case anything else ever needs "just the top one."
 """
 from __future__ import annotations
 
@@ -70,43 +103,86 @@ SEARCH_URL = "https://api.apollo.io/api/v1/mixed_people/api_search"
 MATCH_URL = "https://api.apollo.io/api/v1/people/match"
 TIMEOUT = 60
 
-# Ordered by seniority. First tier with a hit wins. Extended 2026-08-01 for
-# firms with no CFO: Portfolio/Corporate Controller join plain Controller
-# (same seniority, a scope qualifier only); SVP/VP of Accounting join the
-# existing VP-of-Finance-family tier (same level, Accounting instead of
-# Finance); Assistant Controller gets its OWN tier below that one, since
-# it's genuinely more junior than a full Controller -- placed above Finance
-# Manager per instruction. Director of Accounting was already present.
+# Ordered by seniority. First tier with a hit wins.
+#
+# Extended 2026-08-02: an executive tier immediately after CFO and before
+# the SVP/VP-of-Finance-and-Accounting tier -- at a firm with no CFO, the
+# Principal/Founder/President IS the economic buyer the ICP model needs to
+# reach, which outranks a Controller. That means this tier must also
+# outrank Controller, so the SVP/VP-family tier moved above Controller too
+# (see below) -- a full SVP/VP of Accounting is more senior than a plain
+# Controller, and the executive tier has to sit above that whole chain, not
+# just above Controller directly.
+#
+# Extended 2026-08-01 for firms with no CFO: Portfolio/Corporate Controller
+# join plain Controller (same seniority, a scope qualifier only); SVP/VP of
+# Accounting join the existing VP-of-Finance-family tier (same level,
+# Accounting instead of Finance); Assistant Controller gets its OWN tier
+# below that one, since it's genuinely more junior than a full Controller --
+# placed above Finance Manager per instruction. Director of Accounting was
+# already present.
 TIERS = [
     ("chief financial officer", "cfo"),
-    ("controller", "corporate controller", "portfolio controller"),
+    ("principal", "founder", "co-founder", "owner", "managing partner",
+     "managing director", "president", "chief executive officer", "ceo",
+     "chief operating officer", "coo", "partner"),
     ("svp of finance", "svp finance", "senior vice president of finance",
      "svp of accounting", "senior vice president of accounting",
      "vp of finance", "vp finance", "vice president of finance",
      "vice president of corporate finance", "vp corporate accounting",
      "vp of accounting", "director of finance", "head of finance"),
+    ("controller", "corporate controller", "portfolio controller"),
     ("assistant controller",),
     ("finance manager", "financial manager", "finance director"),
     ("accounting manager", "director of accounting"),
 ]
 EXCLUDE = re.compile(r"\b(intern|internship|assistant to|coordinator|clerk)\b", re.I)
 
-# A bare "controller" keyword match must NOT also catch "Assistant
-# Controller" -- that's a real, more junior title with its own tier above
-# (TIERS index 3). Confirmed by direct check before this fix: with plain
-# substring matching, "controller" in "assistant controller" is True, so
-# a naive keyword-list scan would rank an Assistant Controller as equal
-# seniority to a full Controller, and -- worse -- could pick whichever one
-# Apollo happened to list first when both exist at the same firm.
-# "Corporate Controller"/"Portfolio Controller" are unaffected (no
-# "assistant " prefix), so they still match this pattern too.
-_CONTROLLER_RE = re.compile(r"(?<!assistant )\bcontroller\b")
+# Per-keyword exclusions where plain word-boundary matching alone isn't
+# enough -- each one found by exhaustively checking every keyword against
+# every OTHER tier's titles before finalizing TIERS, not guessed at:
+#
+# "controller": must not also catch "Assistant Controller" -- a real, more
+# junior title with its own tier below. Plain substring matching, "controller"
+# in "assistant controller", is True; even \bcontroller\b alone still matches
+# it (both words are whole words), so this needs the lookbehind specifically.
+#
+# "principal": must not also catch "Principal Accountant" -- an
+# accounting-track title, not the executive/economic-buyer role this tier
+# means.
+#
+# "president": must not also catch "Vice President of Finance" or "Senior
+# Vice President of Accounting" -- both already have their own, lower
+# VP-family tier. The lookbehind excludes "vice " specifically, which
+# covers "Senior Vice President..." too (the text immediately before
+# "president" there is still "vice ", regardless of "senior" further back).
+#
+# "managing director": must not also catch "Managing Director of
+# Accounting"/"...of Finance" -- function-scoped roles that belong in the
+# existing Accounting/Finance tiers below, not the company-wide executive
+# tier. Falls through correctly once excluded here: "director of
+# accounting"/"director of finance" in the lower tiers still match them.
+#
+# "partner": must not also catch "Partnership Accountant" (already handled
+# by \bpartner\b alone -- "partner" is not a whole word inside
+# "partnership") or "Finance Business Partner" (a real, commonly-used
+# finance title where "partner" means "business partnering," not equity
+# partnership -- found during the exhaustive pairwise check, not named
+# explicitly, but the same shape of problem).
+_KEYWORD_EXCLUSIONS: dict[str, re.Pattern] = {
+    "controller": re.compile(r"(?<!assistant )\bcontroller\b"),
+    "principal": re.compile(r"\bprincipal\b(?!\s+accountant)"),
+    "president": re.compile(r"(?<!vice )\bpresident\b"),
+    "managing director": re.compile(r"\bmanaging director\b(?!\s+of\s+(?:accounting|finance))"),
+    "partner": re.compile(r"(?<!business )\bpartner\b"),
+}
 
 
 def _title_matches_keyword(title: str, keyword: str) -> bool:
-    if keyword == "controller":
-        return bool(_CONTROLLER_RE.search(title))
-    return keyword in title
+    pattern = _KEYWORD_EXCLUSIONS.get(keyword)
+    if pattern is not None:
+        return bool(pattern.search(title))
+    return bool(re.search(rf"\b{re.escape(keyword)}\b", title))
 
 
 def _noop(_: str) -> None:
@@ -261,21 +337,45 @@ def _firm_matches(candidate_org_name: str, target_firm_name: str) -> bool:
     return extra.issubset(_TOLERABLE_EXTRAS)
 
 
-def _rank(people: list[dict], firm_name: str) -> Optional[dict]:
-    """Return the most senior finance person whose own organization name
-    fuzzy-matches firm_name, or None. Filters to firm-matching candidates
-    once, up front, rather than inside the per-tier loop below (which
-    would otherwise re-check the same non-matching candidate once per
-    tier)."""
+# people/match spends an Apollo credit per call. Capped, not unbounded, so
+# a firm with a long tail of nominally-matching-but-unverified candidates
+# can't burn credits indefinitely.
+MAX_MATCH_ATTEMPTS = 5
+
+
+def _rank_all(people: list[dict], firm_name: str) -> list[dict]:
+    """Every firm-matching candidate, most senior first (ties broken by
+    Apollo's own result order within a tier). Filters to firm-matching
+    candidates once, up front, rather than inside the per-tier loop below
+    (which would otherwise re-check the same non-matching candidate once
+    per tier). A candidate is included at most once even if its title
+    happens to satisfy keywords in more than one tier (defensive; TIERS is
+    designed so this shouldn't happen, but dedup costs nothing)."""
     candidates = [p for p in people if _firm_matches(_org_name(p), firm_name)]
+    ranked: list[dict] = []
+    seen_ids: set = set()
     for tier in TIERS:
         for p in candidates:
             t = (p.get("title") or "").lower()
             if not t or EXCLUDE.search(t):
                 continue
-            if any(_title_matches_keyword(t, kw) for kw in tier):
-                return p
-    return None
+            if not any(_title_matches_keyword(t, kw) for kw in tier):
+                continue
+            pid = p.get("id")
+            if pid in seen_ids:
+                continue
+            seen_ids.add(pid)
+            ranked.append(p)
+    return ranked
+
+
+def _rank(people: list[dict], firm_name: str) -> Optional[dict]:
+    """The single most senior firm-matching candidate, or None. Thin
+    wrapper over _rank_all -- find_senior_poc itself now walks the full
+    list (see below), but this stays for any caller that only wants the
+    top one."""
+    ranked = _rank_all(people, firm_name)
+    return ranked[0] if ranked else None
 
 
 def find_senior_poc(firm_name: str, domain: Optional[str] = None,
@@ -288,11 +388,18 @@ def find_senior_poc(firm_name: str, domain: Optional[str] = None,
     and the senior hit (a CFO) existed only in the domain-scoped result --
     domain search finds more and better candidates when it's available at
     all. Falls back to q_organization_name when there is no domain, or the
-    domain search finds no senior-finance hit whose organization actually
-    matches firm_name.
+    domain search finds no ranked candidate at all.
 
-    Two Apollo calls on success: one search, one match. The match spends a
-    credit. Only email_status == "verified" is accepted.
+    Walks the FULL ranked candidate list (most senior first), calling
+    people/match for each until one comes back with email_status ==
+    "verified", up to MAX_MATCH_ATTEMPTS. Previously this gave up entirely
+    the moment the single top-ranked candidate's email came back
+    unverified, even when a lower-ranked but still relevant candidate
+    existed and would have resolved -- a firm with a real, reachable
+    contact produced no draft because the FIRST person Apollo returned
+    didn't have one. Every rejected candidate is logged via progress as
+    "name (title): email_status=<status>"; only "verified" is ever
+    accepted.
     """
     key = _key()
     if not key:
@@ -301,40 +408,46 @@ def find_senior_poc(firm_name: str, domain: Optional[str] = None,
     headers = _headers(key)
 
     seen_count = 0
-    hit = None
+    ranked: list[dict] = []
 
     if domain:
         domain_people = _search(headers, {"q_organization_domains_list": [domain],
                                           "per_page": 100})
         seen_count += len(domain_people)
-        hit = _rank(domain_people, firm_name)
+        ranked = _rank_all(domain_people, firm_name)
 
-    if not hit:
+    if not ranked:
         name_people = _search(headers, {"q_organization_name": firm_name, "per_page": 100})
         seen_count += len(name_people)
-        hit = _rank(name_people, firm_name)
+        ranked = _rank_all(name_people, firm_name)
 
-    if not hit:
+    if not ranked:
         progress(f"{firm_name}: Apollo returned no senior finance title "
                  f"({seen_count} people seen).")
         return None
 
-    r = requests.post(MATCH_URL, headers=headers, json={"id": hit["id"]},
-                      timeout=TIMEOUT)
-    if r.status_code != 200:
-        progress(f"{firm_name}: Apollo match failed HTTP {r.status_code}.")
-        return None
+    attempts = ranked[:MAX_MATCH_ATTEMPTS]
+    for hit in attempts:
+        r = requests.post(MATCH_URL, headers=headers, json={"id": hit["id"]},
+                          timeout=TIMEOUT)
+        if r.status_code != 200:
+            progress(f"{firm_name}: Apollo match failed HTTP {r.status_code} "
+                     f"for {hit.get('title')}.")
+            continue
 
-    person = (r.json() or {}).get("person") or {}
-    email = (person.get("email") or "").strip()
-    status = person.get("email_status")
-    name = person.get("name")
-    title = hit.get("title")
+        person = (r.json() or {}).get("person") or {}
+        email = (person.get("email") or "").strip()
+        status = person.get("email_status")
+        name = person.get("name")
+        title = hit.get("title")
 
-    if not email or status != "verified":
-        progress(f"{firm_name}: {name or 'contact'} ({title}) has no verified "
-                 f"email (status={status}).")
-        return None
+        if not email or status != "verified":
+            progress(f"{firm_name}: {name or 'contact'} ({title}): email_status={status}")
+            continue
 
-    progress(f"{firm_name}: {name}, {title}, {email} (verified).")
-    return name, email, title
+        progress(f"{firm_name}: {name}, {title}, {email} (verified).")
+        return name, email, title
+
+    progress(f"{firm_name}: no verified email among {len(attempts)} "
+             "senior-finance candidate(s) tried.")
+    return None
