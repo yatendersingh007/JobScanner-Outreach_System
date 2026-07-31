@@ -1694,3 +1694,140 @@ TLD classification including every vanity-gTLD negative and the
 qualified/disqualified/already-parked verdicts). 0 failures. No vendored
 `.py` file touched. No scan command run — verified via `pytest` and direct
 function calls only.
+
+## Three deck/gate defects from a real generated deck (Choice NY) - 2026-08-05
+
+Choice NY Property Management LLC — a third-party residential/commercial
+property manager, confirmed against the actual generated deck already
+sitting in `generated_decks_c/` — surfaced three defects: two fixed in
+Workflow D's own code (`lib_referral/deck_filler.py` is vendored,
+untouched), one investigated and reported only, per instruction.
+
+**1. The retry forced fabricated fit content.** Live log: `[DECK EMPTY]
+fund_structures returned empty by model`, same for
+`underwriting_acquisitions` and `capital_markets` — correct: this firm has
+no funds, no acquisitions arm, no capital stack. Then `[DECK RETRY] ...
+filled on retry` for all three, which shipped to slide 04. Traced to
+`build_fill_data()`'s Part C retry (FIX 36) in `deck_filler.py`: it exists
+specifically to override a genuinely-empty fit paragraph, on the premise
+(stated in its own retry prompt, gated behind an optional `fit_hint`
+Workflow D never passes) that "a slot should never be genuinely
+unfillable." That premise doesn't hold for a firm this narrow — no
+capability-grounded rewrite of "capital markets support" is honest for a
+firm with no capital markets activity at all.
+
+`deck_filler.py` has no parameter to disable the retry outright.
+`config.TEST_MODE` is the retry's only other gate, and it's too broad: it
+also reroutes `get_deck_content()` itself to a canned fixture, replacing
+real content generation entirely, not just the retry. The one seam that
+skips ONLY the retry, without touching the vendored file: the retry's own
+token-budget check, `tokens_so_far >= config.MAX_LLM_TOKENS_PER_FIRM` (the
+same FIX 34/36 guard), where `tokens_so_far` is read straight off the
+`deck_content` dict `_generate_deck()` (`src/signal_drafting.py`) already
+owns before ever passing it to `build_and_convert()`. Setting
+`deck_content["tokens_used"] = gate_config.MAX_LLM_TOKENS_PER_FIRM`
+unconditionally trips that gate, declining the retry for every firm, every
+time — not a conditional workaround, a deliberate policy choice using the
+mechanism's own documented purpose.
+
+**2. Empty field labels rendered as dangling text.** Slide 3 (Choice NY's
+own generated PPTX, unzipped and inspected directly) showed bare
+`Founded`, `Investing since`, and `Capital stack complexity:  ` runs with
+nothing after them, because `research` had no `founded_year`/
+`capital_stack`. Confirmed these three strings appear nowhere in
+`templates/pitch_slots.json` — they are FIXED slide XML in
+`templates/Pitch_Master.pptx` itself, never a slot `fill_deck()` is even
+aware of, so there is no code path, vendored or otherwise, that already
+conditions them on whether the paired value is empty.
+
+Since the labels live in fixed slide XML the vendored code never touches,
+the fix has to operate on the OUTPUT PPTX `build_and_convert()` already
+produced, not on anything upstream. Added `_patch_dangling_labels()`
+(`src/signal_drafting.py`): unzips the generated PPTX, blanks a label run
+IF ITS PAIRED VALUE IS EMPTY, but only when that label locator appears
+EXACTLY ONCE on a given slide — the same "don't guess" posture
+`fill_deck()`'s own slot-fill already uses for an ambiguous locator.
+Verified directly against the real Choice NY `.pptx` on disk before
+writing this into the codebase (copied it, ran the patch, re-inspected
+the runs, confirmed a clean re-zip with no corruption) — not just reasoned
+about. Since `build_and_convert()` already ran PDF conversion on the
+UN-patched file, `_generate_deck()` re-runs `deck_filler.convert_to_pdf()`
+(a public, side-effect-free vendored function) on the patched PPTX
+whenever a patch actually changed something, so the shipped PDF reflects
+it. A patch failure (bad path, corrupt zip, whatever) degrades to
+shipping the original, unpatched PDF rather than blocking the draft — the
+same posture as every other deck-generation failure mode already handled.
+
+Limitation stated plainly: the master template's 5 fit-paragraph slide
+headings, and these 3 label runs, are physically fixed positions in the
+PPTX layout — blanking the paired text run leaves the label's own line
+empty but does not remove its position on the slide (matching FIX 11's own
+already-shipped, already-accepted behavior for a blank fit-paragraph
+heading: "a slot's heading can't be hidden even when its body is empty").
+Full removal of a label's slide position would require editing the master
+template itself, out of scope here.
+
+**3. Investigated: is icp_gate AUM extraction non-deterministic?** Report
+only, no code changed, per instruction. Queried the actual `wd_firms` rows
+for this firm across every run that touched it (`id=65` run 25, `id=66`
+run 27, `id=82` run 28, `id=83` run 29) rather than assuming from the
+symptom. Finding: **AUM extraction itself is not the non-deterministic
+step** — `apply_gate()` is a pure function over whatever `research`
+dict it's given, and `_extract()`'s LLM call runs against a fixed prompt.
+What's actually non-deterministic, confirmed directly:
+
+- Run 25 (`id=65`, a full scan) researched Choice NY fresh: 2 sources
+  (`choicenewyork.com`, a NYC HPD "qualified Mitchell-Lama property
+  managers" page stating "manages assets valued at over $250 million") →
+  `AUM_ESTIMATED`, `$250M` portfolio-value proxy → **qualified**.
+- Run 27 (`id=66`, another full scan, 16 companies gated) hit Choice NY
+  again and correctly REUSED run 25's cached verdict
+  (`verdict_source='cached_wd'`, `verdict_cached_from=65`,
+  byte-identical `research`, identical `gated_at` down to the
+  microsecond) — `wd_dbc.verdict_cache_lookup()` worked exactly as
+  designed here.
+- Run 28 (`id=82`) never finished (`wd_runs.status='running'`,
+  `finished_at=NULL` — a crashed/killed process, matching the exact
+  "a crashed process leaves a 'running' row behind forever" landmine
+  `acquire_run_lock()`'s own docstring already documents; consistent with
+  the operator's own concurrent debugging session that day, including a
+  `kill_run26.py`-style script). Its `wd_firms` row for Choice NY was
+  created (`dbc.create_wd_firm()`) but never updated with a verdict —
+  `icp_status=NULL`, `research=NULL`. A separate, orthogonal finding, not
+  itself about AUM extraction.
+- Run 29 (`id=83`, `wd_runs.csv_path=NULL`, `postings_kept=0`,
+  `companies_grouped=1` — the exact signature of `run_scan.run_single_firm()`,
+  the `/scan "Firm"` single-firm override, "scanner skipped") re-researched
+  Choice NY from scratch: a DIFFERENT 6 sources (LinkedIn, Instagram, SEC
+  adviser-info search, a brokers listing site — notably NOT the NYC HPD
+  page that carried the $250M figure) → no dollar proxy found anywhere in
+  this new set → `AUM_UNVERIFIED` → **parked**.
+
+`firm_key` is identical (`'choice ny property management'`) across all
+four rows — recomputing it directly confirms this isn't a key-normalization
+mismatch. The actual mechanism: **`verdict_cache_lookup()` has exactly one
+call site in the whole codebase, inside `signal_pipeline.run()`'s own
+scan loop** (`signal_pipeline.py:529`) — `run_single_firm()`
+(`src/run_scan.py`) calls `signal_pipeline.gate_group()` directly and
+never consults the cache at all. A firm gated fresh via the single-firm
+override always re-researches from scratch, even when a same-day cached
+qualified verdict already exists, fully exposed to whatever Tavily search
+result variance shows up on that call (CLAUDE.md's own pre-documented
+"Phase 2 research variance" landmine — the mitigation for it, verdict
+caching, exists in the codebase but this one call path was never wired to
+it). This is very likely why Choice NY re-gated at all: run 28 died
+mid-gate for it, and run 29 looks like the operator retrying that one firm
+directly via the single-firm override immediately after — a path that,
+by construction, skips the exact mechanism that would have caught the
+already-qualified verdict sitting one row away. Not fixed here per
+instruction; flagged as a real gap in `run_single_firm()`'s own design,
+distinct from (and more actionable than) "AUM extraction is
+non-deterministic."
+
+Tests: 475 passed (up from 465 — 10 new: `_generate_deck` forcing
+`tokens_used` to the cap, `_patch_dangling_labels`'s blank/leave-alone/
+partial/non-unique/no-op/None-fill_data cases, and `_generate_deck`'s
+reconvert-after-patch / skip-reconvert / patch-failure-falls-back-to-
+original-pdf paths). 0 failures. No vendored `.py` file touched. No scan
+command run — verified via `pytest`, direct function calls, and direct DB
+queries only.

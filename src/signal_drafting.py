@@ -857,7 +857,86 @@ class DraftBatchResult:
 # deck problem must never cost a firm its draft, so that half is guarded here,
 # in Workflow D's own code, the same "an honest blank beats a fabricated or
 # blocked one" posture CLAUDE.md states for everything else in this pipeline.
+#
+# Two more fixes below, both live evidence from a real Choice NY Property
+# Management LLC deck (a third-party property manager -- no funds, no
+# acquisitions arm, no capital stack, no disclosed founding year):
+#
+# 1. build_fill_data()'s Part C retry (FIX 36) rewrote fund_structures,
+# underwriting_acquisitions, and capital_markets from genuinely, correctly
+# empty ([DECK EMPTY]) into invented fit claims ([DECK RETRY] ... filled on
+# retry) that shipped to slide 04. The model was right the first time --
+# this firm has no fit there at all -- and the retry exists specifically to
+# override an honest blank, which is backwards for a firm this narrow.
+# deck_filler.py has no parameter to disable the retry, and config.TEST_MODE
+# (the retry's only other gate) is too broad: it also reroutes
+# get_deck_content() itself to a canned fixture, replacing real content
+# generation entirely, not just the retry. The one seam that skips ONLY the
+# retry is build_fill_data()'s own token-budget check (tokens_so_far >=
+# MAX_LLM_TOKENS_PER_FIRM, FIX 34/36's own guard) -- deck_content is a plain
+# dict this function already owns before build_and_convert() ever sees it,
+# so forcing tokens_used to the cap here declines the retry unconditionally,
+# without editing the vendored file.
+#
+# 2. Slide 3 of the master template carries three FIXED label runs --
+# "Founded", "Investing since", "Capital stack complexity:  " -- that are
+# not slots in pitch_slots.json at all (confirmed: neither string appears
+# anywhere in that file), so fill_deck() never touches them regardless of
+# whether founded_year/capital_stack come out empty. There is no parameter
+# anywhere to ask it to hide a fixed run conditionally. Patched on the
+# OUTPUT PPTX deck_filler already produced (_patch_dangling_labels below),
+# then convert_to_pdf() -- itself a public, side-effect-free vendored
+# function, not a private one -- is re-run so the shipped PDF reflects the
+# patch instead of the stale render build_and_convert() already made from
+# the un-patched file.
 # ---------------------------------------------------------------------------
+_DANGLING_LABELS: dict[str, str] = {
+    "Founded": "founded_year",
+    "Investing since": "founded_year",
+    "Capital stack complexity:  ": "capital_stack",
+}
+
+
+def _patch_dangling_labels(pptx_path, fill_data: dict) -> bool:
+    """Blanks whichever of _DANGLING_LABELS' fixed label runs has an empty
+    paired fill_data value. Returns True if the file was rewritten (the
+    caller must re-run PDF conversion in that case). Only touches a label
+    it can locate EXACTLY ONCE on a given slide -- same "don't guess"
+    posture fill_deck()'s own slot-fill uses for a locator that isn't
+    unique -- so a future master re-export that duplicates or moves this
+    text is skipped, not mishandled."""
+    import zipfile as _zipfile
+
+    labels_to_blank = [label for label, key in _DANGLING_LABELS.items()
+                       if not str((fill_data or {}).get(key) or "").strip()]
+    if not labels_to_blank:
+        return False
+
+    with _zipfile.ZipFile(pptx_path, "r") as zin:
+        names = zin.namelist()
+        contents = {n: zin.read(n) for n in names}
+
+    changed = False
+    for name in names:
+        if not (name.startswith("ppt/slides/slide") and name.endswith(".xml")):
+            continue
+        xml = contents[name].decode("utf-8")
+        for label in labels_to_blank:
+            wrapped = f"<a:t>{label}</a:t>"
+            if xml.count(wrapped) == 1:
+                xml = xml.replace(wrapped, "<a:t></a:t>", 1)
+                changed = True
+        contents[name] = xml.encode("utf-8")
+
+    if not changed:
+        return False
+
+    with _zipfile.ZipFile(pptx_path, "w", _zipfile.ZIP_DEFLATED) as zout:
+        for name in names:
+            zout.writestr(name, contents[name])
+    return True
+
+
 def _generate_deck(firm_name: str, research: dict, progress: Progress) -> Optional[str]:
     """Path to the generated deck PDF, or None if generation/conversion
     failed or produced no PDF. Workflow D has no personalization-hooks
@@ -866,12 +945,22 @@ def _generate_deck(firm_name: str, research: dict, progress: Progress) -> Option
     nothing to add there."""
     try:
         deck_content = deck_filler.get_deck_content(firm_name, research, personalization={})
+        deck_content["tokens_used"] = gate_config.MAX_LLM_TOKENS_PER_FIRM
         result = deck_filler.build_and_convert(firm_name, research, deck_content,
                                                progress=progress, personalization={})
     except Exception as e:  # noqa: BLE001 - a deck failure must never block a draft
         progress(f"{firm_name}: deck generation failed ({e}); drafting without a deck.")
         return None
+
     pdf_path = result.get("pdf_path")
+    try:
+        pptx_path = result.get("pptx_path")
+        fill_data = result.get("fill_data") or {}
+        if pptx_path and _patch_dangling_labels(pptx_path, fill_data):
+            pdf_path = deck_filler.convert_to_pdf(pptx_path, progress=progress) or pdf_path
+    except Exception as e:  # noqa: BLE001 - a labeling patch failure ships the unpatched deck, not none
+        progress(f"{firm_name}: dangling-label patch failed ({e}); shipping the deck unpatched.")
+
     return str(pdf_path) if pdf_path else None
 
 

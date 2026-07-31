@@ -16,6 +16,9 @@ the real generate/retry/fallback control flow.
 """
 from __future__ import annotations
 
+import re
+import zipfile
+
 import lib_snapshot.models as models_mod
 import pytest
 
@@ -708,6 +711,185 @@ def test_generate_deck_returns_none_and_logs_on_exception(monkeypatch):
 
     assert result is None
     assert any("deck generation failed" in msg for msg in progressed)
+
+
+def test_generate_deck_forces_tokens_used_to_the_cap_to_suppress_the_retry(monkeypatch):
+    """Run 27 (Choice NY, a third-party property manager): build_fill_data()'s
+    Part C retry rewrote genuinely-empty fund_structures/
+    underwriting_acquisitions/capital_markets fit paragraphs into invented
+    fit claims that shipped to slide 04. deck_filler.py has no parameter to
+    disable the retry -- the only exposed seam is its own token-budget
+    check (tokens_so_far >= MAX_LLM_TOKENS_PER_FIRM). Forcing tokens_used to
+    the cap here declines the retry unconditionally, without editing the
+    vendored file."""
+    monkeypatch.setattr(sd.deck_filler, "get_deck_content",
+                        lambda firm_name, research, personalization: {"profile_bullets": []})
+    captured = {}
+
+    def fake_build_and_convert(firm_name, research, deck_content, progress=None, personalization=None):
+        captured["deck_content"] = dict(deck_content)
+        return {"pptx_path": None, "pdf_path": "generated_decks_c/Acme_Pitch.pdf", "fill_data": {}}
+
+    monkeypatch.setattr(sd.deck_filler, "build_and_convert", fake_build_and_convert)
+
+    sd._generate_deck("Acme Capital", {}, progress=lambda m: None)
+
+    assert captured["deck_content"]["tokens_used"] == sd.gate_config.MAX_LLM_TOKENS_PER_FIRM
+
+
+# ---------------------------------------------------------------------------
+# _patch_dangling_labels: run 27, Choice NY live evidence -- slide 3's fixed
+# "Founded"/"Investing since"/"Capital stack complexity:  " labels rendered
+# dangling (no value) since they aren't slots in pitch_slots.json at all.
+# ---------------------------------------------------------------------------
+def _make_test_pptx(tmp_path, slide_xml, name="test.pptx"):
+    path = tmp_path / name
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("ppt/slides/slide1.xml", slide_xml)
+    return path
+
+
+def _slide_runs(pptx_path, member="ppt/slides/slide1.xml"):
+    with zipfile.ZipFile(pptx_path) as z:
+        xml = z.read(member).decode("utf-8")
+    return re.findall(r"<a:t>(.*?)</a:t>", xml)
+
+
+_SAMPLE_SLIDE_XML = (
+    "<p:sld><a:t>2008</a:t><a:t>Founded</a:t><a:t>Investing since</a:t>"
+    "<a:t>Capital stack complexity:  </a:t><a:t>LP, GP, Co-GP</a:t></p:sld>"
+)
+
+
+def test_patch_dangling_labels_blanks_labels_when_values_are_empty(tmp_path):
+    path = _make_test_pptx(tmp_path, _SAMPLE_SLIDE_XML)
+
+    changed = sd._patch_dangling_labels(path, {"founded_year": "", "capital_stack": ""})
+
+    assert changed is True
+    runs = _slide_runs(path)
+    assert "Founded" not in runs
+    assert "Investing since" not in runs
+    assert "Capital stack complexity:  " not in runs
+
+
+def test_patch_dangling_labels_leaves_labels_alone_when_values_present(tmp_path):
+    path = _make_test_pptx(tmp_path, _SAMPLE_SLIDE_XML)
+
+    changed = sd._patch_dangling_labels(path, {"founded_year": "2008", "capital_stack": "LP, GP"})
+
+    assert changed is False
+    runs = _slide_runs(path)
+    assert "Founded" in runs
+    assert "Investing since" in runs
+    assert "Capital stack complexity:  " in runs
+
+
+def test_patch_dangling_labels_blanks_only_the_label_with_an_empty_value(tmp_path):
+    path = _make_test_pptx(tmp_path, _SAMPLE_SLIDE_XML)
+
+    changed = sd._patch_dangling_labels(path, {"founded_year": "2008", "capital_stack": ""})
+
+    assert changed is True
+    runs = _slide_runs(path)
+    assert "Founded" in runs                          # founded_year present -- left alone
+    assert "Investing since" in runs
+    assert "Capital stack complexity:  " not in runs   # capital_stack empty -- blanked
+
+
+def test_patch_dangling_labels_skips_a_label_that_is_not_unique_on_a_slide(tmp_path):
+    """Same "don't guess" posture as fill_deck()'s own slot-fill: a locator
+    that appears more than once on a slide is left untouched rather than
+    risking the wrong run."""
+    xml = _SAMPLE_SLIDE_XML + "<a:t>Founded</a:t>"
+    path = _make_test_pptx(tmp_path, xml)
+
+    changed = sd._patch_dangling_labels(path, {"founded_year": "", "capital_stack": ""})
+
+    assert changed is True   # "Investing since" still unique, still blanked
+    runs = _slide_runs(path)
+    assert runs.count("Founded") == 2          # ambiguous, left untouched
+    assert "Investing since" not in runs
+
+
+def test_patch_dangling_labels_returns_false_when_nothing_to_blank(tmp_path):
+    path = _make_test_pptx(tmp_path, "<p:sld><a:t>hello</a:t></p:sld>")
+
+    changed = sd._patch_dangling_labels(path, {"founded_year": "2008", "capital_stack": "LP, GP"})
+
+    assert changed is False
+
+
+def test_patch_dangling_labels_treats_none_fill_data_as_all_empty(tmp_path):
+    path = _make_test_pptx(tmp_path, _SAMPLE_SLIDE_XML)
+
+    changed = sd._patch_dangling_labels(path, None)
+
+    assert changed is True
+    assert "Founded" not in _slide_runs(path)
+
+
+def test_generate_deck_reconverts_to_pdf_after_patching_dangling_labels(tmp_path, monkeypatch):
+    pptx_path = _make_test_pptx(tmp_path, _SAMPLE_SLIDE_XML)
+    monkeypatch.setattr(sd.deck_filler, "get_deck_content",
+                        lambda firm_name, research, personalization: {"profile_bullets": []})
+    monkeypatch.setattr(
+        sd.deck_filler, "build_and_convert",
+        lambda firm_name, research, deck_content, progress=None, personalization=None: {
+            "pptx_path": pptx_path, "pdf_path": "stale.pdf",
+            "fill_data": {"founded_year": "", "capital_stack": ""},
+        },
+    )
+    convert_calls = []
+    monkeypatch.setattr(sd.deck_filler, "convert_to_pdf",
+                        lambda path, progress=None: convert_calls.append(path) or "fresh.pdf")
+
+    result = sd._generate_deck("Acme Capital", {}, progress=lambda m: None)
+
+    assert result == "fresh.pdf"
+    assert convert_calls == [pptx_path]
+    assert "Founded" not in _slide_runs(pptx_path)
+
+
+def test_generate_deck_skips_reconversion_when_nothing_needed_patching(tmp_path, monkeypatch):
+    pptx_path = _make_test_pptx(tmp_path, _SAMPLE_SLIDE_XML)
+    monkeypatch.setattr(sd.deck_filler, "get_deck_content",
+                        lambda firm_name, research, personalization: {"profile_bullets": []})
+    monkeypatch.setattr(
+        sd.deck_filler, "build_and_convert",
+        lambda firm_name, research, deck_content, progress=None, personalization=None: {
+            "pptx_path": pptx_path, "pdf_path": "original.pdf",
+            "fill_data": {"founded_year": "2008", "capital_stack": "LP, GP"},
+        },
+    )
+    convert_calls = []
+    monkeypatch.setattr(sd.deck_filler, "convert_to_pdf",
+                        lambda path, progress=None: convert_calls.append(path) or "should-not-be-used.pdf")
+
+    result = sd._generate_deck("Acme Capital", {}, progress=lambda m: None)
+
+    assert result == "original.pdf"
+    assert convert_calls == []
+
+
+def test_generate_deck_falls_back_to_original_pdf_when_patch_raises(monkeypatch):
+    """A label-patch failure (e.g. an inaccessible file) must ship the
+    deck's original PDF, never crash the draft."""
+    monkeypatch.setattr(sd.deck_filler, "get_deck_content",
+                        lambda firm_name, research, personalization: {"profile_bullets": []})
+    monkeypatch.setattr(
+        sd.deck_filler, "build_and_convert",
+        lambda firm_name, research, deck_content, progress=None, personalization=None: {
+            "pptx_path": "does/not/exist.pptx", "pdf_path": "original.pdf",
+            "fill_data": {"founded_year": "", "capital_stack": ""},
+        },
+    )
+    progressed = []
+
+    result = sd._generate_deck("Acme Capital", {}, progress=progressed.append)
+
+    assert result == "original.pdf"
+    assert any("dangling-label patch failed" in msg for msg in progressed)
 
 
 def test_draft_for_run_respects_draft_cap(monkeypatch):
