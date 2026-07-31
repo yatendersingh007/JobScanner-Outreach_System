@@ -1,16 +1,32 @@
 """src/wd_poc.py (NOT vendored, closes the Apollo POC-search gap).
 
-Two things under adversarial test here:
+Three things under adversarial test here:
 1. Search order: q_organization_domains_list first when a domain exists
    (a live comparison found 78 people via domain vs 12 via name for the
    same firm, with the CFO hit only in the domain-scoped result),
    q_organization_name as the fallback.
-2. _rank rejects any candidate whose organization.name doesn't fuzzy-match
-   the target firm name, via lib_referral/matching/normalize.py's existing
-   normalizer (not a new one) -- "Shinda Management Corp." must match
-   "Shinda Management Corporation" (pure legal-suffix variation); "Wasatch
-   Bridge Capital Group" must NOT match "Wasatch Group" (a real,
-   distinguishing token, "Bridge", differs).
+2. _firm_matches's containment rule (not strict equality -- see the
+   module docstring for why containment alone isn't enough and the extra
+   tokens must be checked against _TOLERABLE_EXTRAS, not lib_referral's
+   full SUFFIX_TOKENS): "Choice New York Companies" must match "Choice NY
+   Property Management LLC" (an abbreviation plus a merely-less-detailed
+   name, both live-observed -- Apollo returned this pair 41 times for one
+   real firm); "Shinda Management Corp." must match "Shinda Management
+   Corporation" (pure legal-suffix variation); "Wasatch Bridge Capital
+   Group" must NOT match "Wasatch Group" (a real distinguishing token,
+   "Bridge", differs); "Kairos Real Estate Partners" must NOT match
+   "Kairos Investment Management" (FIX 28's own collision shape -- two
+   different, non-empty business-descriptor sets, not one side simply
+   omitting detail); "Acme Capital Partners" must NOT match "Beta Real
+   Estate Holdings" (completely unrelated).
+3. TIERS recognizes senior finance titles at firms with no CFO (SVP/VP of
+   Accounting, Portfolio/Corporate Controller, Assistant Controller, ...),
+   correctly seniority-ordered -- including the one real collision this
+   surfaced: plain substring matching would have ranked "Assistant
+   Controller" as equal seniority to "Controller" (the substring
+   "controller" is IN "assistant controller"), so a naive scan could pick
+   whichever one Apollo happened to list first when both exist at the same
+   firm.
 
 No network: _search and the final requests.post (people/match) are
 monkeypatched directly. lib_referral/ and lib_snapshot/ are read, never
@@ -58,6 +74,11 @@ def _mock_match(monkeypatch, name, email, status="verified"):
     ("Shinda Management Corporation", "Shinda Management Corp."),
     ("Shinda Management", "Shinda Management Corp."),  # bare name, no suffix at all
     ("SHINDA MANAGEMENT CORP", "shinda management corporation"),  # case-insensitive
+    # Live-observed: 41 Apollo domain hits for this exact pair, all rejected
+    # by the old set-equality check ({choice,ny} != {choice,new,york}).
+    ("Choice New York Companies", "Choice NY Property Management LLC"),
+    ("Choice NY Property Management LLC", "Choice New York Companies"),
+    ("Choice NY Companies", "Choice New York Property Management LLC"),
 ])
 def test_firm_matches_legal_suffix_variants(candidate, target):
     assert wd_poc._firm_matches(candidate, target) is True
@@ -67,6 +88,10 @@ def test_firm_matches_legal_suffix_variants(candidate, target):
     ("Wasatch Group", "Wasatch Bridge Capital Group"),
     ("Wasatch Bridge Capital Group", "Wasatch Group"),
     ("Meridian Realty Partners", "Meridian Bridge Capital"),  # {"meridian"} vs {"meridian","bridge"}
+    # FIX 28's own collision shape: two DIFFERENT, non-empty
+    # business-descriptor sets, not one side simply omitting detail.
+    ("Kairos Real Estate Partners", "Kairos Investment Management"),
+    ("Kairos Investment Management", "Kairos Real Estate Partners"),
 ])
 def test_firm_matches_rejects_distinguishing_token_mismatch(candidate, target):
     assert wd_poc._firm_matches(candidate, target) is False
@@ -83,6 +108,24 @@ def test_firm_matches_shinda_case_exactly_as_specified():
     assert wd_poc._firm_matches("Shinda Management Corp.", "Shinda Management Corporation") is True
 
 
+def test_firm_matches_choice_case_exactly_as_specified():
+    """The exact live-observed pair: must match. "NY" is an abbreviation of
+    "New York", not a distinguishing token."""
+    assert wd_poc._firm_matches("Choice New York Companies",
+                                "Choice NY Property Management LLC") is True
+
+
+def test_firm_matches_kairos_case_exactly_as_specified():
+    """The exact adversarial pair given: must NOT match."""
+    assert wd_poc._firm_matches("Kairos Real Estate Partners",
+                                "Kairos Investment Management") is False
+
+
+def test_firm_matches_acme_beta_case_exactly_as_specified():
+    """The exact adversarial pair given: must NOT match."""
+    assert wd_poc._firm_matches("Acme Capital Partners", "Beta Real Estate Holdings") is False
+
+
 def test_firm_matches_empty_or_none_never_matches():
     assert wd_poc._firm_matches("", "Shinda Management Corp.") is False
     assert wd_poc._firm_matches("Shinda Management Corp.", "") is False
@@ -92,6 +135,20 @@ def test_firm_matches_empty_or_none_never_matches():
 
 def test_firm_matches_completely_unrelated_names():
     assert wd_poc._firm_matches("Acme Capital Partners", "Beta Real Estate Holdings") is False
+
+
+@pytest.mark.parametrize("abbrev,spelled_out", [
+    ("Choice NJ Holdings", "Choice New Jersey Holdings"),
+    ("Choice CA Holdings", "Choice California Holdings"),
+    ("Choice LA Holdings", "Choice Los Angeles Holdings"),
+    ("Choice SF Holdings", "Choice San Francisco Holdings"),
+    ("Acme Intl Partners", "Acme International Partners"),
+    ("Acme Mgmt", "Acme Management"),
+    ("Acme Assoc", "Acme Associates"),
+    ("Acme Ptnrs", "Acme Partners"),
+])
+def test_firm_matches_other_required_abbreviations(abbrev, spelled_out):
+    assert wd_poc._firm_matches(abbrev, spelled_out) is True
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +181,69 @@ def test_rank_picks_the_most_senior_matching_candidate():
     ]
     hit = wd_poc._rank(people, "Shinda Management Corporation")
     assert hit["title"] == "Chief Financial Officer"
+
+
+# ---------------------------------------------------------------------------
+# TIERS extension: senior finance titles at firms with no CFO
+# ---------------------------------------------------------------------------
+FIRM = "Acme Capital Partners"
+
+
+@pytest.mark.parametrize("title", [
+    "SVP of Accounting",
+    "Senior Vice President of Accounting",
+    "Portfolio Controller",
+    "VP Corporate Accounting",
+    "VP of Accounting",
+    "Corporate Controller",
+    "Director of Accounting",
+    "Assistant Controller",
+])
+def test_rank_recognizes_new_senior_titles_with_no_cfo_present(title):
+    people = [_person("a", title, FIRM)]
+    hit = wd_poc._rank(people, FIRM)
+    assert hit is not None
+    assert hit["title"] == title
+
+
+def test_rank_ranks_controller_above_assistant_controller_regardless_of_list_order():
+    """The real collision this surfaced: plain substring matching means
+    "controller" in "assistant controller" is True, so a naive scan could
+    rank an Assistant Controller as equal to a full Controller and pick
+    whichever one Apollo happened to list first."""
+    assistant_first = [_person("assistant", "Assistant Controller", FIRM),
+                       _person("full", "Controller", FIRM)]
+    controller_first = [_person("full", "Controller", FIRM),
+                        _person("assistant", "Assistant Controller", FIRM)]
+    assert wd_poc._rank(assistant_first, FIRM)["title"] == "Controller"
+    assert wd_poc._rank(controller_first, FIRM)["title"] == "Controller"
+
+
+def test_rank_ranks_assistant_controller_above_finance_manager():
+    people = [_person("fm", "Finance Manager", FIRM),
+             _person("ac", "Assistant Controller", FIRM)]
+    assert wd_poc._rank(people, FIRM)["title"] == "Assistant Controller"
+
+
+def test_rank_ranks_assistant_controller_below_svp_of_accounting():
+    people = [_person("svp", "SVP of Accounting", FIRM),
+             _person("ac", "Assistant Controller", FIRM)]
+    assert wd_poc._rank(people, FIRM)["title"] == "SVP of Accounting"
+
+
+def test_rank_portfolio_and_corporate_controller_rank_with_plain_controller():
+    """Same seniority tier as plain Controller -- a scope qualifier only,
+    not a demotion."""
+    people = [_person("pc", "Portfolio Controller", FIRM),
+             _person("fm", "Finance Manager", FIRM)]
+    assert wd_poc._rank(people, FIRM)["title"] == "Portfolio Controller"
+
+
+def test_title_matches_keyword_controller_excludes_assistant():
+    assert wd_poc._title_matches_keyword("assistant controller", "controller") is False
+    assert wd_poc._title_matches_keyword("controller", "controller") is True
+    assert wd_poc._title_matches_keyword("corporate controller", "controller") is True
+    assert wd_poc._title_matches_keyword("portfolio controller", "controller") is True
 
 
 # ---------------------------------------------------------------------------
