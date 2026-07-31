@@ -17,6 +17,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from lib_snapshot.config import NORTH_AMERICA
+
 from . import wd_config as config
 from . import wd_dbc as dbc
 
@@ -253,6 +255,87 @@ def connector_health(jobs: list, expected_sources: list[str]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Geo TLD backstop (run 27 follow-up). Wires lib_snapshot.config.NORTH_AMERICA
+# -- defined there, never referenced anywhere until now -- into a Workflow-D-
+# local check on the ONE domain that actually exists anywhere in this system:
+# the gate's own post-research research["domain"]/["own_domain"].
+#
+# This is NOT the domain-mismatch cross-check that was asked for alongside
+# it. That check needs a SECOND, independently-derived domain -- the actual
+# posting's employer domain -- to compare the gate's resolved domain
+# against. A full investigation (three parallel research passes over every
+# scanner connector, the gating pipeline, and the wd_postings/wd_firms
+# schema) found no such value anywhere in Workflow D's own code today:
+# - JSearch's raw API response DOES carry an employer_website field
+#   (confirmed live against a real captured response), but the vendored
+#   adapter (scanner/connectors/adapters/jsearch.py) never reads it, and
+#   the vendored NormalizedJob model (scanner/models.py) has no field to
+#   hold it even if it did -- both vendored, so this is a donor-repo
+#   (job-scanner) fix, not something patchable here.
+# - TinyFish's LinkedIn scraper is never even asked for a domain -- its own
+#   output schema has no such property.
+# - The ats:* connector family (Greenhouse/Lever/Workday/...) WOULD produce
+#   employer-adjacent URLs, but scanner/config.yaml's ats.companies list is
+#   empty, so it contributes zero postings in the live configuration.
+# - Every wd_postings.url value under what IS enabled today (jsearch,
+#   tinyfish) is a job-board or ATS-vendor URL (linkedin.com,
+#   ziprecruiter.com, boards.greenhouse.io/<slug>, ...), never the
+#   employer's own root domain -- parsing one as a domain guess would be
+#   actively wrong, and would reopen the exact class of collision FIX 28
+#   protects against (a slug is not a verified identity).
+# - The only "domain" anywhere in wd_firms/wd_postings is research["domain"]
+#   itself, produced BY the gate's own Tavily/LLM resolution -- comparing
+#   it against itself is circular, not a cross-check.
+# BUILD_LOG.md's prior AlphaX post-mortem asserted Workflow D "already
+# knows the posting's employer domain from the scanner" -- that assertion
+# does not hold up; corrected here rather than left standing.
+#
+# What THIS check catches instead, independent of that gap: a firm whose
+# domain the gate DID correctly resolve, but which carries an unambiguous
+# non-North-American country-code TLD -- catching an LLM region_ok
+# misjudgment even when the domain data itself was right there. It would
+# NOT have caught the AlphaX incident specifically -- that run's
+# gate-resolved domain was "alphax-capital.com" (a .com, no foreign TLD at
+# all), because the gate had resolved to a different, wrongly-matched
+# company's domain, not a foreign one. Deliberately excludes ccTLDs widely
+# repurposed as vanity gTLDs by North American firms (.io, .ai, .co, .me,
+# .tv, .ly) -- flagging those would misfire on legitimate US/Canadian
+# firms for nothing more than a fashionable domain suffix.
+# ---------------------------------------------------------------------------
+_CCTLD_COUNTRY: dict[str, str] = {
+    ".us": "United States", ".ca": "Canada", ".mx": "Mexico",
+    ".ae": "United Arab Emirates", ".uk": "United Kingdom", ".in": "India",
+    ".sg": "Singapore", ".hk": "Hong Kong", ".cn": "China", ".de": "Germany",
+    ".fr": "France", ".es": "Spain", ".it": "Italy", ".nl": "Netherlands",
+    ".ch": "Switzerland", ".au": "Australia", ".nz": "New Zealand",
+    ".za": "South Africa", ".br": "Brazil", ".il": "Israel",
+    ".sa": "Saudi Arabia", ".qa": "Qatar", ".kw": "Kuwait", ".eg": "Egypt",
+    ".jp": "Japan", ".kr": "South Korea", ".ie": "Ireland", ".se": "Sweden",
+    ".no": "Norway", ".dk": "Denmark", ".be": "Belgium", ".pt": "Portugal",
+    ".at": "Austria", ".pl": "Poland", ".tr": "Turkey", ".th": "Thailand",
+    ".my": "Malaysia", ".ph": "Philippines", ".id": "Indonesia",
+    ".vn": "Vietnam", ".pk": "Pakistan", ".bd": "Bangladesh", ".ng": "Nigeria",
+    ".ke": "Kenya", ".ar": "Argentina", ".cl": "Chile", ".pe": "Peru",
+    ".ru": "Russia", ".ua": "Ukraine",
+}
+
+
+def foreign_domain_park_reason(research: dict) -> Optional[str]:
+    """None if the gate's own resolved domain gives no reason to doubt
+    region_ok, else a park reason naming the country/TLD. Matches on the
+    LONGEST recognized suffix first ("co.uk" domains still end in ".uk" and
+    match correctly via plain endswith; no compound-suffix table needed)."""
+    domain = str((research or {}).get("domain")
+                or (research or {}).get("own_domain") or "").strip().lower()
+    if not domain:
+        return None
+    for suffix, country in _CCTLD_COUNTRY.items():
+        if domain.endswith(suffix) and country not in NORTH_AMERICA:
+            return f"domain {domain} carries a {country} ({suffix}) TLD, outside North America"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Gate
 # ---------------------------------------------------------------------------
 def gate_group(run_id: int, group: FirmGroup, progress: Progress) -> dict:
@@ -290,13 +373,22 @@ def gate_group(run_id: int, group: FirmGroup, progress: Progress) -> dict:
                            icp_reason="per-firm token budget exceeded")
         return dbc.get_wd_firm(firm["id"])
 
+    icp_status, icp_reason = res.icp_result, res.icp_reason
+    park_reason, park_source = res.park_reason, res.park_source
+    if icp_status == "qualified":
+        geo_reason = foreign_domain_park_reason(res.research)
+        if geo_reason:
+            progress(f"{group.firm_name}: {geo_reason}. Parked despite the gate qualifying it.")
+            icp_status, icp_reason = "parked", geo_reason
+            park_reason, park_source = geo_reason, "geo_tld_check"
+
     dbc.update_wd_firm(
         firm["id"],
-        icp_status=res.icp_result,
-        icp_reason=res.icp_reason,
+        icp_status=icp_status,
+        icp_reason=icp_reason,
         aum_tag=res.aum_tag,
-        park_reason=res.park_reason,
-        park_source=res.park_source,
+        park_reason=park_reason,
+        park_source=park_source,
         confidence=res.confidence,
         source_count=res.source_count,
         research=res.research,

@@ -1604,3 +1604,93 @@ ZipRecruiter negative case, and the Telegram guard itself). 0 failures. No
 vendored `.py` file touched (`git status --porcelain -- scanner/
 lib_referral/ lib_snapshot/` shows no `.py` files dirty). No scan command
 run — verified via `pytest` and direct function calls/DB queries only.
+
+## Run 27 follow-up: geo TLD backstop, and a correction to the entry above - 2026-08-04
+
+**Correction first.** The entry above asserted, in passing, that "Workflow
+D already knows the posting's employer domain from the scanner." That
+claim was wrong, and a full investigation (three parallel research passes:
+every scanner connector plus `scanner/models.py`, `signal_pipeline.py`'s
+`gate_group()`/`FirmGroup` at the exact moment it calls the gate, and the
+`wd_postings`/`wd_firms` Postgres schema) does not support it:
+
+- The raw JSearch (RapidAPI) response DOES carry an `employer_website`
+  field — confirmed live against a real captured response (`Metasys
+  Technologies` -> `https://www.metasysinc.com`, `Montcure LLC` ->
+  `https://montcure.com`, cleanly distinct from the job-board apply link in
+  the same rows). But `scanner/connectors/adapters/jsearch.py`'s mapping
+  loop never reads it, and `scanner/models.py`'s `NormalizedJob` dataclass
+  has no field to hold it even if it were read. Both vendored — capturing
+  it is a fix against the donor `job-scanner` repo, not something
+  patchable here.
+- `scanner/connectors/tinyfish.py`'s LinkedIn scraper is never even asked
+  for a domain — its own output schema has no such property at all.
+- The one connector family whose URLs ARE genuinely employer-branded
+  (`ats:*` — Greenhouse/Lever/Workday/Ashby/Workable/SmartRecruiters,
+  `scanner/connectors/ats.py`) has an empty `companies: []` list in
+  `scanner/config.yaml`, so it contributes zero postings in the live
+  configuration. Even populated, its URLs are third-party ATS domains
+  (`boards.greenhouse.io/<slug>`, `jobs.lever.co/<slug>`), not the
+  employer's own root domain.
+- Every `wd_postings.url` value under what's actually enabled today
+  (`aggregator:jsearch`, `tinyfish:*`) is a job-board URL — LinkedIn,
+  ZipRecruiter, SelectLeaders, eFinancialCareers — confirmed connector by
+  connector. Parsing one as a domain guess would be actively wrong (a job
+  board's own domain is not the employer's), and would reopen the exact
+  shape of collision FIX 28 protects against.
+- The only "domain" anywhere in `wd_firms`/`wd_postings` is
+  `research["domain"]`/`["own_domain"]` itself, produced BY
+  `icp_gate.py`'s own Tavily/LLM resolution keyed on firm name alone.
+  Comparing it against itself is circular, not an independent
+  cross-check.
+
+Net: the requested domain-mismatch check (gate-resolved domain vs. the
+posting's own employer domain) is **not buildable today** without either
+(a) filing the scanner-side capture fix upstream against `job-scanner` and
+re-vendoring, or (b) fabricating an unreliable domain guess from a
+job-board/ATS URL, which was explicitly rejected here as introducing a new
+FIX-28-style collision risk rather than closing one. Not implemented.
+Flagged plainly rather than built around quietly.
+
+**What WAS added: `foreign_domain_park_reason()` + wiring in
+`gate_group()`, `src/signal_pipeline.py`.** Independent of the blocked
+half above, this wires `lib_snapshot.config.NORTH_AMERICA` — defined
+there, never referenced anywhere else in the codebase before this — into
+a check on the ONE domain that does exist: the gate's own resolved
+`research["domain"]`/`["own_domain"]`, AFTER `research_and_gate()`
+returns but before the verdict is persisted. If the domain carries an
+unambiguous non-North-American country-code TLD (`.ae`, `.uk`/`.co.uk`,
+`.in`, `.sg`, `.hk`, `.cn`, and similar — ~45 curated), an otherwise-
+QUALIFIED verdict is overridden to `parked`, with a distinct
+`park_source="geo_tld_check"` so it reads differently from the gate's own
+park reasons (`research`/`match`/`infrastructure`) in `/status` and the
+Telegram summary. A disqualified or already-parked verdict is left alone
+— the check only guards the one dangerous case, a firm about to qualify
+and draft.
+
+Deliberately excludes ccTLDs widely repurposed as vanity/brand gTLDs by
+North American firms — `.io`, `.ai`, `.co`, `.me`, `.tv`, `.ly` — since
+flagging those would misfire on legitimate US/Canadian companies for
+nothing more than a fashionable domain suffix, not a real geography
+signal. Verified empirically (a standalone check run before writing the
+final table) against both the required flags and these vanity-gTLD
+negatives.
+
+**Honest limitation, stated directly**: this backstop would **not** have
+caught the actual run-27 AlphaX incident. AlphaX's gate-resolved domain
+was `alphax-capital.com` — a `.com`, no foreign TLD at all — because the
+gate had resolved to a different, wrongly-matched US company's domain,
+not a foreign one (see the entry above). What this check catches instead
+is a genuinely different, real gap: a firm whose domain the gate DID
+correctly resolve, but which carries a foreign TLD that an LLM-judged
+`region_ok` might still misjudge as North American. Both gaps are real;
+neither substitutes for the other. Locked in as its own regression test
+(`test_gate_group_alphax_regression_still_qualifies_since_gate_resolved_a_dot_com`)
+rather than left as a claim.
+
+Tests: 465 passed (up from 434 — 31 new: `foreign_domain_park_reason`'s
+TLD classification including every vanity-gTLD negative and the
+`domain`-over-`own_domain` precedence, and `gate_group()`'s wiring across
+qualified/disqualified/already-parked verdicts). 0 failures. No vendored
+`.py` file touched. No scan command run — verified via `pytest` and direct
+function calls only.
