@@ -17,7 +17,7 @@ import json as _json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 from lib_referral import apollo_enrich, config as gate_config, deck_filler, fact_check, gmail_client, testmode
@@ -908,12 +908,102 @@ class DraftBatchResult:
 # fragility deck_filler.py's own geometry constants already accept (see
 # its _AUM_VALUE_TILE_MAX_CHARS comment) -- a future master re-export that
 # renumbers these shapes needs this table updated to match.
+# Run 29 follow-up, same mechanism extended in three ways, all from real
+# generated decks plus Workflow C's own Kingbird deck read as the reference:
+#
+# a. Slide 12 (SECTION 04, "Where this fits <firm> specifically") has the
+# same construction as slide 3's cards -- five stacked roundRect row bars,
+# each with a static heading text box and a fit_paragraph_N body text box on
+# top. With the Part C retry now declined (above), a genuinely-empty section
+# leaves the bar rendering with its heading and no body: Choice NY ships an
+# empty "Complex Fund Structures" and "Capital Markets Expertise" bar, Neal
+# an empty "Complex Fund Structures" bar. Workflow C ships this defect too --
+# its Kingbird deck has an empty "Tailored Investor Reporting" bar -- so
+# there is no upstream behavior to inherit here, only the same fix applied
+# one slide over.
+#
+# b. Reflow. Deleting a group used to leave its vertical slot vacant: Neal's
+# slide 3 lost the AUM card and left the Founded card marooned in slot 2 with
+# an empty quadrant above it. Survivors now shift up into the slots the
+# deleted groups vacated, so a stack always fills from the top with no gap.
+# Slot positions are read from the deck's OWN container geometry at run time
+# rather than hardcoded, and a survivor only ever moves up (its target slot
+# index is always <= its own), so this can never push a shape off-slide.
+#
+# c. Slide 3's Founded card carries a third text box reading "Investing
+# since" that pitch_slots.json has no slot for at all -- nothing fills it,
+# in either workflow, ever. The master's AUM card uses that third line for
+# aum_asof ("as of Dec 31, 2025"); the Founded card's equivalent line was
+# authored as a bare sentence fragment with no value to complete it, so it
+# renders dangling on every deck that has a founded_year (Neal: "1970 /
+# Founded / Investing since"). Populating it from founded_year is not the
+# fix -- the card already shows that year as its headline figure and its
+# "Founded" label right above. It is listed as `valueless` below: deleted
+# with its card when the card goes, and deleted on its own when the card
+# stays.
+#
+# Slides are still resolved from pitch_slots.json (never hardcoded), stacks
+# are still atomic, and the shape-name table is still master-specific in
+# exactly the way documented above.
 # ---------------------------------------------------------------------------
-_DANGLING_SHAPE_GROUPS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
-    ("Shape 4", ("Text 5", "Text 6", "Text 7"), ("aum_value", "aum_label", "aum_asof")),
-    ("Shape 8", ("Text 9", "Text 10", "Text 11"), ("founded_year",)),
-    ("Shape 12", ("Text 13",), ("capital_stack",)),
+class _DeckShapeGroup(NamedTuple):
+    """One card / footer / row: a container shape plus the text boxes drawn
+    on top of it. `keys` are the fill_data keys whose values that group
+    displays -- ALL of them empty means the group has nothing to show and is
+    deleted whole. `valueless` names shapes inside the group that no slot
+    ever fills (see (c) above); they go whether the group survives or not."""
+    container: str
+    content: tuple[str, ...]
+    keys: tuple[str, ...]
+    valueless: tuple[str, ...] = ()
+
+
+class _DeckShapeStack(NamedTuple):
+    """Groups sharing one vertical stack of slots on one slide. `anchor_key`
+    is any fill_data key on that slide -- pitch_slots.json resolves it to the
+    slide number. `reflow` is False for a lone full-width group that has no
+    other slot to move into."""
+    anchor_key: str
+    reflow: bool
+    groups: tuple[_DeckShapeGroup, ...]
+
+
+_DECK_SHAPE_STACKS: tuple[_DeckShapeStack, ...] = (
+    # Slide 3: the two stat cards in the right-hand column.
+    _DeckShapeStack("aum_value", True, (
+        _DeckShapeGroup("Shape 4", ("Text 5", "Text 6", "Text 7"),
+                        ("aum_value", "aum_label", "aum_asof")),
+        _DeckShapeGroup("Shape 8", ("Text 9", "Text 10", "Text 11"),
+                        ("founded_year",), valueless=("Text 11",)),
+    )),
+    # Slide 3: the full-width capital-stack footer bar. Nothing to reflow into.
+    _DeckShapeStack("capital_stack", False, (
+        _DeckShapeGroup("Shape 12", ("Text 13",), ("capital_stack",)),
+    )),
+    # Slide 12: the five stacked fit rows. Each row also owns a decorative
+    # icon, a <p:pic> rather than a <p:sp> -- caught by rendering the patched
+    # deck to PDF and looking at it: the first version of this table listed
+    # only the text boxes, which left the deleted row's icon orphaned on the
+    # slide and left every surviving row's icon behind at its original y
+    # while the bar it belongs to moved up without it.
+    # NOTE the shape names collide with slide 3's ("Shape 12", "Text 13",
+    # "Text 5") -- that collision is exactly why the slide is resolved per
+    # stack instead of searched for.
+    _DeckShapeStack("fit_paragraph_1", True, (
+        _DeckShapeGroup("Shape 3", ("Image 0", "Text 4", "Text 5"), ("fit_paragraph_1",)),
+        _DeckShapeGroup("Shape 6", ("Image 1", "Text 7", "Text 8"), ("fit_paragraph_2",)),
+        _DeckShapeGroup("Shape 9", ("Image 2", "Text 10", "Text 11"), ("fit_paragraph_3",)),
+        _DeckShapeGroup("Shape 12", ("Image 3", "Text 13", "Text 14"), ("fit_paragraph_4",)),
+        _DeckShapeGroup("Shape 15", ("Image 4", "Text 16", "Text 17"), ("fit_paragraph_5",)),
+    )),
 )
+
+# <p:sp> (text boxes, containers) and <p:pic> (the slide-12 row icons). The
+# backreference keeps the two from being matched across each other; neither
+# element type nests inside the other in any slide this touches.
+_SHAPE_RE = re.compile(r"<p:(sp|pic)>.*?</p:\1>", re.DOTALL)
+_SHAPE_NAME_RE = re.compile(r'<p:cNvPr id="\d+" name="([^"]*)"')
+_SHAPE_OFF_RE = re.compile(r'<a:off x="(-?\d+)" y="(-?\d+)"\s*/>')
 
 
 def _slide_no_for_key(slot_map: dict, key: str) -> Optional[str]:
@@ -924,36 +1014,88 @@ def _slide_no_for_key(slot_map: dict, key: str) -> Optional[str]:
     return None
 
 
+def _shape_y(shape_xml: str) -> Optional[int]:
+    """The shape's own y offset in EMU, or None if it carries no explicit
+    geometry (inherited from the layout -- not something to reflow blind)."""
+    m = _SHAPE_OFF_RE.search(shape_xml)
+    return int(m.group(2)) if m else None
+
+
+def _shift_shape_y(shape_xml: str, delta: int) -> str:
+    m = _SHAPE_OFF_RE.search(shape_xml)
+    if not m or not delta:
+        return shape_xml
+    shifted = f'<a:off x="{m.group(1)}" y="{int(m.group(2)) + delta}"/>'
+    return shape_xml[:m.start()] + shifted + shape_xml[m.end():]
+
+
+def _apply_deck_shape_stack(xml: str, stack: _DeckShapeStack, fill_data: dict) -> str:
+    """This stack's slide XML with every all-empty group deleted whole, every
+    valueless shape deleted, and the surviving groups reflowed up into the
+    vacated slots. Returns `xml` unchanged if there is nothing to do.
+
+    The whole stack is atomic: every shape name it lists must be locatable
+    EXACTLY ONCE on the slide or nothing in it is touched, the same "don't
+    guess" posture fill_deck()'s own slot-fill takes on a locator that isn't
+    unique. Deliberately not per-group: reflow needs every slot position in
+    the stack to be known, and deleting only the unambiguous shapes would
+    leave an orphaned container or text box behind, which reads worse on the
+    slide than leaving the stack alone."""
+    shapes: dict[str, list[str]] = {}
+    for match in _SHAPE_RE.finditer(xml):
+        shape_xml = match.group(0)
+        m = _SHAPE_NAME_RE.search(shape_xml)
+        if m:
+            shapes.setdefault(m.group(1), []).append(shape_xml)
+
+    needed = [n for g in stack.groups for n in (g.container, *g.content)]
+    if len(set(needed)) != len(needed):
+        return xml                                   # table bug: a name listed twice in one stack
+    if any(len(shapes.get(n, [])) != 1 for n in needed):
+        return xml
+    one = {n: shapes[n][0] for n in needed}
+    if any(xml.count(one[n]) != 1 for n in needed):  # identical shape XML twice over
+        return xml
+
+    empty = [all(not str((fill_data or {}).get(k) or "").strip() for k in g.keys)
+             for g in stack.groups]
+
+    to_delete: list[str] = []
+    for group, is_empty in zip(stack.groups, empty):
+        to_delete.extend([group.container, *group.content] if is_empty else group.valueless)
+
+    shifts: list[tuple[str, int]] = []
+    slot_ys = [_shape_y(one[g.container]) for g in stack.groups]
+    if stack.reflow and all(y is not None for y in slot_ys):
+        survivors = [g for g, is_empty in zip(stack.groups, empty) if not is_empty]
+        for target_index, group in enumerate(survivors):
+            delta = slot_ys[target_index] - slot_ys[stack.groups.index(group)]
+            if delta:
+                shifts.extend((n, delta) for n in (group.container, *group.content)
+                              if n not in to_delete)
+
+    if not to_delete and not shifts:
+        return xml
+    for name in to_delete:
+        xml = xml.replace(one[name], "", 1)
+    for name, delta in shifts:
+        xml = xml.replace(one[name], _shift_shape_y(one[name], delta), 1)
+    return xml
+
+
 def _delete_empty_deck_shapes(pptx_path, fill_data: dict) -> bool:
-    """Deletes whichever of _DANGLING_SHAPE_GROUPS' whole shape sequences
-    (a card/footer container plus its content text boxes) has EVERY one of
-    its keys empty in fill_data. Returns True if the file was rewritten
-    (the caller must re-run PDF conversion in that case).
-
-    Each group is deleted atomically: every one of its shape names must be
-    locatable EXACTLY ONCE on its slide, or the WHOLE group is left alone,
-    same "don't guess" posture fill_deck()'s own slot-fill uses for a
-    locator that isn't unique. Deliberately not per-shape: deleting only
-    the unambiguous shapes in an otherwise-ambiguous group would leave an
-    orphaned, out-of-place container or text box behind -- worse than
-    leaving the whole group untouched."""
-    groups_to_delete = [
-        (container, content_shapes, keys) for container, content_shapes, keys in _DANGLING_SHAPE_GROUPS
-        if all(not str((fill_data or {}).get(k) or "").strip() for k in keys)
-    ]
-    if not groups_to_delete:
-        return False
-
+    """Applies every _DECK_SHAPE_STACKS entry to the deck in place. Returns
+    True if the file was rewritten (the caller must re-run PDF conversion in
+    that case)."""
     import zipfile as _zipfile
 
     slot_map = deck_filler.load_slot_map()
-    groups_by_slide: dict[str, list[set]] = {}
-    for container, content_shapes, keys in groups_to_delete:
-        slide_no = _slide_no_for_key(slot_map, keys[0])
-        if not slide_no:
-            continue
-        groups_by_slide.setdefault(slide_no, []).append({container, *content_shapes})
-    if not groups_by_slide:
+    plan: list[tuple[str, _DeckShapeStack]] = []
+    for stack in _DECK_SHAPE_STACKS:
+        slide_no = _slide_no_for_key(slot_map, stack.anchor_key)
+        if slide_no:
+            plan.append((f"ppt/slides/slide{slide_no}.xml", stack))
+    if not plan:
         return False
 
     with _zipfile.ZipFile(pptx_path, "r") as zin:
@@ -961,26 +1103,14 @@ def _delete_empty_deck_shapes(pptx_path, fill_data: dict) -> bool:
         contents = {n: zin.read(n) for n in names}
 
     changed = False
-    for slide_no, groups in groups_by_slide.items():
-        member = f"ppt/slides/slide{slide_no}.xml"
+    for member, stack in plan:
         if member not in contents:
             continue
         xml = contents[member].decode("utf-8")
-        shapes_by_name: dict[str, list[str]] = {}
-        for shape_xml in re.findall(r"<p:sp>.*?</p:sp>", xml, re.DOTALL):
-            m = re.search(r'<p:cNvPr id="\d+" name="([^"]*)"', shape_xml)
-            if m:
-                shapes_by_name.setdefault(m.group(1), []).append(shape_xml)
-
-        for group_names in groups:
-            if any(len(shapes_by_name.get(n, [])) != 1 for n in group_names):
-                continue
-            for shape_name in group_names:
-                shape_xml = shapes_by_name[shape_name][0]
-                if xml.count(shape_xml) == 1:
-                    xml = xml.replace(shape_xml, "", 1)
-                    changed = True
-        contents[member] = xml.encode("utf-8")
+        patched = _apply_deck_shape_stack(xml, stack, fill_data)
+        if patched != xml:
+            contents[member] = patched.encode("utf-8")
+            changed = True
 
     if not changed:
         return False

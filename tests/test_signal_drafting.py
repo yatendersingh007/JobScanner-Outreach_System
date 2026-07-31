@@ -863,30 +863,89 @@ def test_generate_deck_leaves_bullets_alone_when_research_has_no_oneliner(monkey
 # this): an AUM card (Shape 4 + Text 5/6/7), a Founded card (Shape 8 +
 # Text 9/10/11), and a capital-stack footer (Shape 12 + Text 13).
 # ---------------------------------------------------------------------------
-def _shape(shape_id, name, text=None):
+EMU_PER_INCH = 914400
+
+
+def _xfrm(y_inches):
+    """The shape's own <a:xfrm>, or a bare <p:spPr/> when y_inches is None
+    (a shape with no explicit geometry -- reflow must leave those alone)."""
+    if y_inches is None:
+        return "<p:spPr/>"
+    y = int(round(y_inches * EMU_PER_INCH))
+    return (f'<p:spPr><a:xfrm><a:off x="457200" y="{y}"/>'
+            f'<a:ext cx="2331720" cy="567" /></a:xfrm></p:spPr>')
+
+
+def _shape(shape_id, name, text=None, y=None):
     body = "" if text is None else f'<p:txBody><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody>'
     return (f'<p:sp><p:nvSpPr><p:cNvPr id="{shape_id}" name="{name}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>'
-           f'<p:spPr/>{body}</p:sp>')
+           f'{_xfrm(y)}{body}</p:sp>')
+
+
+def _pic(shape_id, name, y=None):
+    """A slide-12 row icon. <p:pic>, not <p:sp> -- deleting and reflowing
+    these with their row is the whole point of the element-type handling."""
+    return (f'<p:pic><p:nvPicPr><p:cNvPr id="{shape_id}" name="{name}"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>'
+           f'<p:blipFill><a:blip r:embed="rId2"/></p:blipFill>{_xfrm(y)}</p:pic>')
 
 
 def _slide3_xml(aum_value="", aum_label="", aum_asof="", founded_year="", capital_stack="",
-                extra_shapes=""):
+                extra_shapes="", geometry=False):
+    """Mirrors the real master's slide 3 shape sequence exactly. `geometry`
+    adds the master's own y offsets (in inches, from templates/
+    Pitch_Master.pptx) so reflow can be exercised; without it every shape
+    carries a bare <p:spPr/> and reflow must be skipped."""
+    def y(v):
+        return v if geometry else None
     return (
         "<p:sld>"
-        + _shape(2, "Text 0", "SECTION 01")
-        + _shape(6, "Shape 4")                                              # AUM card container
-        + _shape(7, "Text 5", aum_value)
-        + _shape(8, "Text 6", aum_label)
-        + _shape(9, "Text 7", aum_asof)
-        + _shape(10, "Shape 8")                                             # Founded card container
-        + _shape(11, "Text 9", founded_year)
-        + _shape(12, "Text 10", "Founded" if founded_year else "")
-        + _shape(13, "Text 11", "Investing since" if founded_year else "")
-        + _shape(14, "Shape 12")                                            # capital-stack footer container
-        + _shape(15, "Text 13", capital_stack)
+        + _shape(2, "Text 0", "SECTION 01", y=y(0.32))
+        + _shape(6, "Shape 4", y=y(1.50))                                   # AUM card container
+        + _shape(7, "Text 5", aum_value, y=y(1.62))
+        + _shape(8, "Text 6", aum_label, y=y(2.06))
+        + _shape(9, "Text 7", aum_asof, y=y(2.48))
+        + _shape(10, "Shape 8", y=y(2.98))                                  # Founded card container
+        + _shape(11, "Text 9", founded_year, y=y(3.10))
+        + _shape(12, "Text 10", "Founded" if founded_year else "", y=y(3.54))
+        + _shape(13, "Text 11", "Investing since" if founded_year else "", y=y(3.96))
+        + _shape(14, "Shape 12", y=y(4.95))                                 # capital-stack footer container
+        + _shape(15, "Text 13", capital_stack, y=y(4.95))
         + extra_shapes
         + "</p:sld>"
     )
+
+
+# The real master's slide 12: five stacked row bars at these y offsets, each
+# a roundRect container, a <p:pic> icon 0.15in below the bar's top, a static
+# heading text box and the fit_paragraph_N body text box.
+_SLIDE12_ROW_YS = (1.80, 2.54, 3.29, 4.03, 4.78)
+_SLIDE12_HEADINGS = ("Scalable Property Accounting", "Complex Fund Structures",
+                     "Tailored Investor Reporting", "Underwriting &amp; Acquisitions Support",
+                     "Capital Markets Expertise")
+
+
+def _slide12_xml(*bodies, extra_shapes="", geometry=True):
+    """`bodies` is the five fit_paragraph_N values in order."""
+    assert len(bodies) == 5
+    names = (("Shape 3", "Image 0", "Text 4", "Text 5"),
+             ("Shape 6", "Image 1", "Text 7", "Text 8"),
+             ("Shape 9", "Image 2", "Text 10", "Text 11"),
+             ("Shape 12", "Image 3", "Text 13", "Text 14"),
+             ("Shape 15", "Image 4", "Text 16", "Text 17"))
+    out = ["<p:sld>", _shape(2, "Text 0", "SECTION 04", y=0.32 if geometry else None)]
+    shape_id = 5
+    for (container, icon, heading_box, body_box), row_y, heading, body in zip(
+            names, _SLIDE12_ROW_YS, _SLIDE12_HEADINGS, bodies):
+        y = row_y if geometry else None
+        icon_y = (row_y + 0.15) if geometry else None
+        out.append(_shape(shape_id, container, y=y))
+        out.append(_pic(shape_id + 1, icon, y=icon_y))
+        out.append(_shape(shape_id + 2, heading_box, heading, y=y))
+        out.append(_shape(shape_id + 3, body_box, body, y=y))
+        shape_id += 4
+    out.append(extra_shapes)
+    out.append("</p:sld>")
+    return "".join(out)
 
 
 def _make_test_pptx(tmp_path, member_xml, member="ppt/slides/slide3.xml", name="test.pptx",
@@ -903,6 +962,24 @@ def _shape_names(pptx_path, member="ppt/slides/slide3.xml"):
     with zipfile.ZipFile(pptx_path) as z:
         xml = z.read(member).decode("utf-8")
     return re.findall(r'<p:cNvPr id="\d+" name="([^"]*)"', xml)
+
+
+def _shape_ys(pptx_path, member="ppt/slides/slide3.xml"):
+    """{shape name: y offset in inches} for every shape that has geometry."""
+    with zipfile.ZipFile(pptx_path) as z:
+        xml = z.read(member).decode("utf-8")
+    out = {}
+    for match in re.finditer(r"<p:(sp|pic)>.*?</p:\1>", xml, re.DOTALL):
+        block = match.group(0)
+        name = re.search(r'<p:cNvPr id="\d+" name="([^"]*)"', block)
+        off = re.search(r'<a:off x="-?\d+" y="(-?\d+)"', block)
+        if name and off:
+            out[name.group(1)] = round(int(off.group(1)) / EMU_PER_INCH, 2)
+    return out
+
+
+def _slide12_fill(*bodies):
+    return {f"fit_paragraph_{i}": body for i, body in enumerate(bodies, start=1)}
 
 
 def test_delete_empty_deck_shapes_neal_regression_no_disclosed_aum(tmp_path):
@@ -946,7 +1023,8 @@ def test_delete_empty_deck_shapes_keeps_a_card_with_only_one_empty_field(tmp_pat
     """aum_asof blank but aum_value/aum_label populated is NOT "every value
     empty" -- the card must stay, matching the pre-existing, already-
     accepted behavior of a single blank caption line inside an otherwise
-    populated card."""
+    populated card. All three containers survive; the only thing that goes
+    is the Founded card's valueless "Investing since" line."""
     xml = _slide3_xml(aum_value="$4.4B", aum_label="Gross Asset Value", aum_asof="",
                       founded_year="2008", capital_stack="LP, GP")
     path = _make_test_pptx(tmp_path, xml)
@@ -956,20 +1034,42 @@ def test_delete_empty_deck_shapes_keeps_a_card_with_only_one_empty_field(tmp_pat
         "founded_year": "2008", "capital_stack": "LP, GP",
     })
 
-    assert changed is False
+    assert changed is True
     names = _shape_names(path)
     assert "Shape 4" in names and "Shape 8" in names and "Shape 12" in names
+    assert "Text 5" in names and "Text 9" in names and "Text 10" in names and "Text 13" in names
+    assert "Text 11" not in names
 
 
-def test_delete_empty_deck_shapes_returns_false_when_everything_is_populated(tmp_path):
+def test_delete_empty_deck_shapes_drops_the_valueless_investing_since_line(tmp_path):
+    """Live evidence, both decks: the Founded card's third text box reads
+    "Investing since" with no value after it, because pitch_slots.json has
+    no slot for it and nothing in either workflow ever fills it. It goes
+    even when the card it belongs to is fully populated and stays."""
     xml = _slide3_xml(aum_value="$4.4B", aum_label="Gross Asset Value", aum_asof="as of Dec 31, 2025",
-                      founded_year="2008", capital_stack="LP, GP")
+                      founded_year="1970", capital_stack="LP, GP")
     path = _make_test_pptx(tmp_path, xml)
 
     changed = sd._delete_empty_deck_shapes(path, {
         "aum_value": "$4.4B", "aum_label": "Gross Asset Value", "aum_asof": "as of Dec 31, 2025",
-        "founded_year": "2008", "capital_stack": "LP, GP",
+        "founded_year": "1970", "capital_stack": "LP, GP",
     })
+
+    assert changed is True
+    names = _shape_names(path)
+    assert "Text 11" not in names                       # "Investing since", nothing ever fills it
+    assert "Shape 8" in names and "Text 9" in names     # the card and its year are real, they stay
+    assert "Text 10" in names                           # so is its "Founded" label
+
+
+def test_delete_empty_deck_shapes_returns_false_when_everything_is_populated(tmp_path):
+    """Slide 12 with all five fit paragraphs filled: nothing to delete,
+    nothing to reflow, file left untouched. (A slide-3 fixture can't show
+    this any more -- its valueless "Investing since" line always goes.)"""
+    xml = _slide12_xml("b1", "b2", "b3", "b4", "b5")
+    path = _make_test_pptx(tmp_path, xml, member="ppt/slides/slide12.xml")
+
+    changed = sd._delete_empty_deck_shapes(path, _slide12_fill("b1", "b2", "b3", "b4", "b5"))
 
     assert changed is False
 
@@ -980,16 +1080,18 @@ def test_delete_empty_deck_shapes_treats_none_fill_data_as_all_empty(tmp_path):
     changed = sd._delete_empty_deck_shapes(path, None)
 
     assert changed is True
-    assert _shape_names(path) == ["Text 0"]   # all three groups deleted
+    assert _shape_names(path) == ["Text 0"]   # both cards and the footer deleted
 
 
-def test_delete_empty_deck_shapes_is_atomic_per_group(tmp_path):
-    """A group whose shape names can't ALL be uniquely resolved is left
-    entirely alone -- not partially deleted. Partial deletion (content
-    gone, an ambiguous container orphaned behind) would read worse on the
-    slide than leaving the whole group untouched. Caught in testing before
-    this reached the codebase: an earlier, per-shape (non-atomic) version
-    would have deleted "Text 5/6/7" here even with "Shape 4" ambiguous."""
+def test_delete_empty_deck_shapes_is_atomic_per_stack(tmp_path):
+    """A stack whose shape names can't ALL be uniquely resolved is left
+    entirely alone -- not partially deleted. Partial deletion (content gone,
+    an ambiguous container orphaned behind) would read worse on the slide
+    than leaving the stack untouched, and reflow needs every slot position
+    in the stack to be known before it can move anything. Caught in testing
+    before this reached the codebase: an earlier, per-shape (non-atomic)
+    version would have deleted "Text 5/6/7" here even with "Shape 4"
+    ambiguous."""
     xml = _slide3_xml(aum_value="", aum_label="", aum_asof="", founded_year="1970", capital_stack="",
                       extra_shapes=_shape(66, "Shape 4"))   # duplicate AUM container name
     path = _make_test_pptx(tmp_path, xml)
@@ -998,12 +1100,152 @@ def test_delete_empty_deck_shapes_is_atomic_per_group(tmp_path):
         "aum_value": "", "aum_label": "", "aum_asof": "", "founded_year": "1970", "capital_stack": "",
     })
 
-    assert changed is True   # capital-stack group still resolves fine
+    assert changed is True   # the capital-stack footer is its own stack, still resolves fine
     names = _shape_names(path)
     assert names.count("Shape 4") == 2   # ambiguous AUM group untouched, including its content
     assert "Text 5" in names and "Text 6" in names and "Text 7" in names
-    assert "Shape 8" in names            # Founded card: real content, never a deletion candidate
-    assert "Shape 12" not in names       # capital_stack empty, unambiguous -- still deleted
+    # the Founded card shares the ambiguous stack, so even its valueless
+    # "Investing since" line is left alone rather than half-treated
+    assert "Shape 8" in names and "Text 11" in names
+    assert "Shape 12" not in names       # capital_stack empty, separate stack -- still deleted
+
+
+# ---------------------------------------------------------------------------
+# Slide 12 (SECTION 04) fit rows, and reflow. Live evidence: with the Part C
+# retry declined, a genuinely-empty fit section leaves its bar rendering with
+# a heading and no body -- Choice NY ships two of them, Neal one, and
+# Workflow C's own Kingbird deck ships one, so there is no upstream behavior
+# to inherit. Survivors must also close the gap the deleted row leaves.
+# ---------------------------------------------------------------------------
+def test_delete_empty_deck_shapes_deletes_an_empty_fit_row_whole(tmp_path):
+    """Neal live evidence: fit_paragraph_2 came back empty, so the whole
+    "Complex Fund Structures" row goes -- bar, icon and both text boxes."""
+    xml = _slide12_xml("b1", "", "b3", "b4", "b5")
+    path = _make_test_pptx(tmp_path, xml, member="ppt/slides/slide12.xml")
+
+    changed = sd._delete_empty_deck_shapes(path, _slide12_fill("b1", "", "b3", "b4", "b5"))
+
+    assert changed is True
+    names = _shape_names(path, member="ppt/slides/slide12.xml")
+    for gone in ("Shape 6", "Image 1", "Text 7", "Text 8"):
+        assert gone not in names
+    for kept in ("Shape 3", "Image 0", "Text 4", "Text 5", "Shape 9", "Shape 12", "Shape 15"):
+        assert kept in names
+
+
+def test_delete_empty_deck_shapes_reflows_fit_rows_with_no_gap(tmp_path):
+    """The rows below a deleted one move up into the vacated slots, so the
+    stack always reads from the top with no hole in it. Slot positions are
+    the deck's own; a survivor only ever moves up."""
+    xml = _slide12_xml("b1", "", "b3", "b4", "b5")
+    path = _make_test_pptx(tmp_path, xml, member="ppt/slides/slide12.xml")
+
+    sd._delete_empty_deck_shapes(path, _slide12_fill("b1", "", "b3", "b4", "b5"))
+
+    ys = _shape_ys(path, member="ppt/slides/slide12.xml")
+    slot1, slot2, slot3, slot4 = _SLIDE12_ROW_YS[:4]
+    assert ys["Shape 3"] == slot1                       # row 1 already at the top, unmoved
+    assert ys["Shape 9"] == slot2                       # row 3 -> slot 2
+    assert ys["Shape 12"] == slot3                      # row 4 -> slot 3
+    assert ys["Shape 15"] == slot4                      # row 5 -> slot 4
+    # each row's heading, body and icon travel with its bar, icon still
+    # sitting 0.15in below the bar's top edge
+    assert ys["Text 10"] == slot2 and ys["Text 11"] == slot2
+    assert ys["Image 2"] == round(slot2 + 0.15, 2)
+    assert ys["Image 3"] == round(slot3 + 0.15, 2)
+    assert ys["Image 4"] == round(slot4 + 0.15, 2)
+
+
+def test_delete_empty_deck_shapes_reflows_choice_ny_two_empty_rows(tmp_path):
+    """Choice NY live evidence: fit_paragraph_2 AND fit_paragraph_5 empty.
+    Three survivors, packed into the first three slots."""
+    xml = _slide12_xml("b1", "", "b3", "b4", "")
+    path = _make_test_pptx(tmp_path, xml, member="ppt/slides/slide12.xml")
+
+    changed = sd._delete_empty_deck_shapes(path, _slide12_fill("b1", "", "b3", "b4", ""))
+
+    assert changed is True
+    names = _shape_names(path, member="ppt/slides/slide12.xml")
+    assert "Shape 6" not in names and "Image 1" not in names    # row 2 gone
+    assert "Shape 15" not in names and "Image 4" not in names   # row 5 gone
+    ys = _shape_ys(path, member="ppt/slides/slide12.xml")
+    assert [ys["Shape 3"], ys["Shape 9"], ys["Shape 12"]] == list(_SLIDE12_ROW_YS[:3])
+
+
+def test_delete_empty_deck_shapes_reflow_never_moves_a_row_down(tmp_path):
+    """Only the LAST row is empty, so every survivor is already in its own
+    slot and nothing moves. A survivor's target slot index can never exceed
+    its own, which is what keeps reflow from pushing a shape off-slide."""
+    xml = _slide12_xml("b1", "b2", "b3", "b4", "")
+    path = _make_test_pptx(tmp_path, xml, member="ppt/slides/slide12.xml")
+
+    sd._delete_empty_deck_shapes(path, _slide12_fill("b1", "b2", "b3", "b4", ""))
+
+    ys = _shape_ys(path, member="ppt/slides/slide12.xml")
+    assert [ys["Shape 3"], ys["Shape 6"], ys["Shape 9"], ys["Shape 12"]] == list(_SLIDE12_ROW_YS[:4])
+
+
+def test_delete_empty_deck_shapes_reflows_a_marooned_stat_card(tmp_path):
+    """Neal live evidence: the AUM card was deleted and left the Founded
+    card stranded in slot 2 with an empty quadrant above it. The survivor
+    now moves up into slot 1, its own text boxes keeping their offsets
+    inside the card."""
+    xml = _slide3_xml(aum_value="", aum_label="", aum_asof="", founded_year="1970",
+                      capital_stack="", geometry=True)
+    path = _make_test_pptx(tmp_path, xml)
+
+    sd._delete_empty_deck_shapes(path, {
+        "aum_value": "", "aum_label": "", "aum_asof": "", "founded_year": "1970", "capital_stack": "",
+    })
+
+    ys = _shape_ys(path)
+    assert ys["Shape 8"] == 1.50                      # was 2.98, the AUM card's own slot
+    assert ys["Text 9"] == 1.62                       # was 3.10, same 0.12in inset as before
+    assert ys["Text 10"] == 2.06                      # was 3.54
+    assert ys["Text 0"] == 0.32                       # not in the stack, never moves
+
+
+def test_delete_empty_deck_shapes_skips_reflow_without_geometry(tmp_path):
+    """A shape with no explicit <a:xfrm> inherits its position from the
+    layout. Deletion still happens; reflow is skipped rather than guessed
+    at, because there is no slot position to read."""
+    xml = _slide3_xml(aum_value="", aum_label="", aum_asof="", founded_year="1970",
+                      capital_stack="", geometry=False)
+    path = _make_test_pptx(tmp_path, xml)
+
+    changed = sd._delete_empty_deck_shapes(path, {
+        "aum_value": "", "aum_label": "", "aum_asof": "", "founded_year": "1970", "capital_stack": "",
+    })
+
+    assert changed is True
+    names = _shape_names(path)
+    assert "Shape 4" not in names and "Shape 8" in names
+    assert _shape_ys(path) == {}                      # nothing gained geometry it didn't have
+
+
+def test_delete_empty_deck_shapes_keeps_slide_3_and_slide_12_stacks_apart(tmp_path):
+    """"Shape 12", "Text 13" and "Text 5" name DIFFERENT shapes on slide 3
+    and slide 12 -- the capital-stack footer vs the fourth fit row, the AUM
+    figure vs the first row's body. Each stack resolves its own slide from
+    pitch_slots.json, so an empty capital_stack must not touch slide 12's
+    row 4 and a filled row 4 must not save slide 3's footer."""
+    fill = {"aum_value": "$250 million", "aum_label": "Assets Valued", "aum_asof": "",
+            "founded_year": "", "capital_stack": "", **_slide12_fill("b1", "b2", "b3", "b4", "b5")}
+    path = _make_test_pptx(
+        tmp_path,
+        _slide3_xml(aum_value="$250 million", aum_label="Assets Valued", geometry=True),
+        extra_members={"ppt/slides/slide12.xml": _slide12_xml("b1", "b2", "b3", "b4", "b5")},
+    )
+
+    changed = sd._delete_empty_deck_shapes(path, fill)
+
+    assert changed is True
+    slide3 = _shape_names(path)
+    assert "Shape 12" not in slide3 and "Text 13" not in slide3   # footer: capital_stack empty
+    assert "Shape 4" in slide3 and "Text 5" in slide3             # AUM card: real figure
+    slide12 = _shape_names(path, member="ppt/slides/slide12.xml")
+    assert "Shape 12" in slide12 and "Text 13" in slide12         # row 4 filled, untouched
+    assert "Text 5" in slide12                                    # row 1 body, untouched
 
 
 def test_delete_empty_deck_shapes_scopes_deletion_to_the_correct_slide_only(tmp_path):
@@ -1052,17 +1294,15 @@ def test_generate_deck_reconverts_to_pdf_after_deleting_empty_shapes(tmp_path, m
 
 
 def test_generate_deck_skips_reconversion_when_nothing_needed_deleting(tmp_path, monkeypatch):
-    xml = _slide3_xml(aum_value="$4.4B", aum_label="Gross Asset Value", aum_asof="as of Dec 31, 2025",
-                      founded_year="2008", capital_stack="LP, GP")
-    pptx_path = _make_test_pptx(tmp_path, xml)
+    xml = _slide12_xml("b1", "b2", "b3", "b4", "b5")
+    pptx_path = _make_test_pptx(tmp_path, xml, member="ppt/slides/slide12.xml")
+    fill_data = _slide12_fill("b1", "b2", "b3", "b4", "b5")
     monkeypatch.setattr(sd.deck_filler, "get_deck_content",
                         lambda firm_name, research, personalization: {"profile_bullets": []})
     monkeypatch.setattr(
         sd.deck_filler, "build_and_convert",
         lambda firm_name, research, deck_content, progress=None, personalization=None: {
-            "pptx_path": pptx_path, "pdf_path": "original.pdf",
-            "fill_data": {"aum_value": "$4.4B", "aum_label": "Gross Asset Value",
-                         "aum_asof": "as of Dec 31, 2025", "founded_year": "2008", "capital_stack": "LP, GP"},
+            "pptx_path": pptx_path, "pdf_path": "original.pdf", "fill_data": fill_data,
         },
     )
     convert_calls = []

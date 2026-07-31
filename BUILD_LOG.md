@@ -1930,3 +1930,143 @@ prefix-stripping including the live-observed case). 0 failures. No
 vendored `.py` file touched. No scan command run — verified via `pytest`,
 direct function calls, and direct inspection of the real generated `.pptx`
 files in `generated_decks_c/`.
+
+## Slide-04 fit rows, reflow, and two contradicted premises - 2026-08-07
+
+Five reported deck defects, checked against the two real decks in
+`generated_decks_c/`, Workflow C's own generated Kingbird deck in
+`referral-system/generated_decks_c/`, and `templates/Pitch_Master.pptx`.
+Three were real and are fixed. Two rested on a premise the evidence
+contradicts, so per HARD RULE 8 they stop at a report.
+
+### 1. Per-firm slide-04 headlines: no such mechanism exists. Not changed.
+
+The report was that Workflow C generates firm-specific fit-row headlines
+("Complex waterfall verification", "Debt refi cycle management", "Family
+office co-investor reporting", "Property accounting at scale", "Underwriting
+pipeline support") where Workflow D renders fixed labels. Evidence against:
+
+- Those five strings appear in **no deck at all**. Searched every
+  `ppt/slides/slideN.xml` of the master, Workflow C's Kingbird deck, and both
+  Workflow D decks. Zero hits.
+- Kingbird's own slide-12 headlines are the **same five generic labels**
+  Workflow D renders: "Scalable Property Accounting", "Complex Fund
+  Structures", "Tailored Investor Reporting", "Underwriting & Acquisitions
+  Support", "Capital Markets Expertise".
+- In `templates/pitch_slots.json` those five slots are `"type": "fixed"` —
+  declared static, never filled by either workflow.
+- The nearest real text is on **slide 5** (SECTION 03, "Six functions we
+  cover for real estate managers"): "waterfall verification", "Debt refi
+  analysis", "custom family office reports", "sourcing pipeline support".
+  Slide 5 is sha256-identical across master, Kingbird, Choice NY and Neal —
+  static service-catalog copy, not generated for anyone.
+- `grep -n "_heading"` in both the vendored `deck_filler.py` and the donor's
+  current `src/deck_filler.py` matches one line each: a discarded loop
+  variable in `_assemble_fit_paragraphs`. No headline generation anywhere.
+
+Per-slide sha256 across all four files shows only slides 1, 2, 3, 12 and 14
+are ever filled; 4-11 and 13 are static in every deck.
+
+So there is no Workflow C path to route through. Building per-firm headlines
+would be new generation work in Workflow D: a new LLM call or a derivation
+from the fit paragraph, each headline then needing `fact_check.py` grounding
+like every other generated claim (HARD RULE 4) and a `full_replace` slot the
+slot map does not currently declare. That is a feature, not a defect fix, and
+it is the operator's call.
+
+### 2. Empty slide-12 fit rows now delete whole, and the survivors reflow. Fixed.
+
+Real, and confirmed on all three decks: Choice NY ships an empty "Complex
+Fund Structures" and "Capital Markets Expertise" bar, Neal an empty "Complex
+Fund Structures" bar. Workflow C ships the defect too, its Kingbird deck has
+an empty "Tailored Investor Reporting" bar, so again nothing to inherit, only
+the slide-3 card fix applied one slide over.
+
+`_DANGLING_SHAPE_GROUPS` is now `_DECK_SHAPE_STACKS`: groups sharing one
+vertical stack of slots on one slide, with reflow. Survivors shift up into
+the slots the deleted groups vacate. Slot positions are read from the deck's
+own container geometry at run time, never hardcoded, and a survivor's target
+slot index is always <= its own, so reflow can only ever move a shape up.
+
+**Bug caught by rendering the patched deck and looking at it, before it
+reached the codebase:** each slide-12 row also owns a decorative icon that is
+a `<p:pic>`, not a `<p:sp>`. The first version of the table listed only text
+boxes, which left the deleted row's icon orphaned on the slide and left every
+surviving row's icon behind at its original y while the bar it belongs to
+moved up without it. The shape regex now matches both element types
+(backreferenced, so the two can't match across each other) and each row group
+lists its icon.
+
+Atomicity moved from per-group to **per-stack**: reflow needs every slot
+position in a stack known before it can move anything, so one ambiguous shape
+name now leaves that whole stack untouched. The slide-3 footer is its own
+single-group stack, so an ambiguous stat card still doesn't block it.
+
+### 3. Slide-01 dead space: Workflow C does nothing. Reflow added, residual whitespace reported.
+
+Asked what Workflow C does when a firm has fewer stats. Answer: nothing at
+all. `grep` for `p:sp>`, `a:off`, `a:ext`, `reflow`, `remove`, `delete` in the
+donor's `deck_filler.py` matches no geometry or element manipulation, it only
+ever rewrites `<a:t>` runs, by design ("never rebuilds the deck").
+
+Its Kingbird deck is the proof: **both** stat cards present with every run
+blank, plus a capital-stack footer bar carrying a dangling "Capital stack
+complexity:" label and no value. That is exactly the defect Workflow D fixed
+in the previous commit. There is no reflow, resize, or alternate layout to
+match, Workflow D is already strictly ahead here.
+
+The report that "Kingbird fills four stat tiles" describes
+`templates/Pitch_Master.pptx`, which is itself a hand-authored Kingbird deck
+(its slot-map locators are Kingbird's own text). The master fills them, the
+generated Kingbird deck fills none of them.
+
+What is fixed: the marooned-card case below. What is not: with one stat card
+and no footer, the lower right of slide 3 is genuinely empty. Filling it
+needs either a second real stat this firm does not have (fabrication, HARD
+RULE 5) or a master-template layout change. Flagged, not guessed at.
+
+### 4. "Investing since" deleted. Fixed.
+
+The Founded card's third text box reads "Investing since" with nothing after
+it. `pitch_slots.json` has no slot for it, nothing in either workflow ever
+fills it, which is why it renders dangling on every deck with a founded_year
+(Neal: "1970 / Founded / Investing since"). The master's AUM card uses that
+third line for `aum_asof` ("as of Dec 31, 2025"); the Founded card's
+equivalent was authored as a bare sentence fragment with no value to complete
+it.
+
+Populating it from `founded_year` is not the fix: the card already shows that
+year as its headline figure with a "Founded" label directly above it. It is
+listed as `valueless` on its group, deleted with the card when the card goes,
+deleted on its own when the card stays.
+
+The report that Kingbird "pairs it as 'invested since 2008' beneath its stat"
+does not match the file; the master's own three runs are "2008" / "Founded" /
+"Investing since", with the fragment already dangling.
+
+### 5. Marooned surviving stat card. Fixed by the same reflow.
+
+Neal's slide 3 lost the AUM card and left the Founded card in slot 2 with an
+empty quadrant above it. The survivor now moves into slot 1 (y 2.98 -> 1.50)
+with its text boxes keeping their insets (3.10 -> 1.62, 3.54 -> 2.06).
+
+### Verification
+
+Every case rendered to PDF via LibreOffice and inspected as an image, on
+`Pitch_Master.pptx` (the only file with all shapes still present) driven by
+Choice NY's and Neal's actual `fill_data` shapes, plus re-run against both
+real generated decks. All patched files parse as well-formed XML across every
+member, and neither touched slide carries `<p:timing>`, `spTgt` or
+`custDataLst` references to a deleted shape id.
+
+Note the pass is not idempotent by design: re-running it on an
+already-processed deck finds the deleted shapes missing and leaves that stack
+alone. It runs exactly once, on a freshly built deck.
+
+501 tests pass, up from 493 (new: whole-row deletion, reflow with and without
+geometry, reflow-never-moves-down, the Choice NY two-empty-row case, the
+marooned-card case, the valueless "Investing since" line, and slide-3 vs
+slide-12 stack separation for the colliding "Shape 12"/"Text 13"/"Text 5"
+names). 0 failures. No vendored `.py` file touched, and no template file
+touched. No scan command run.
+
