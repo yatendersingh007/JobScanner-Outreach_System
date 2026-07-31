@@ -16,6 +16,7 @@ the real generate/retry/fallback control flow.
 """
 from __future__ import annotations
 
+import pathlib
 import re
 import zipfile
 
@@ -1250,26 +1251,40 @@ def test_delete_empty_deck_shapes_scopes_deletion_to_the_correct_slide_only(tmp_
 
 
 def test_generate_deck_reconverts_to_pdf_after_deleting_empty_shapes(tmp_path, monkeypatch):
+    """Reconversion now goes through a staging directory and returns the path
+    it MOVED the fresh file to, not whatever convert_to_pdf reported. The
+    converter is handed a copy of the pptx in that staging dir, so
+    convert_calls records a staged path rather than the original."""
     xml = _slide3_xml(aum_value="", aum_label="", aum_asof="", founded_year="1970", capital_stack="")
     pptx_path = _make_test_pptx(tmp_path, xml)
+    stale_pdf = tmp_path / "test.pdf"
+    stale_pdf.write_bytes(b"%PDF-1.4 STALE pre-patch render\n")
     monkeypatch.setattr(sd.deck_filler, "get_deck_content",
                         lambda firm_name, research, personalization: {"profile_bullets": []})
     monkeypatch.setattr(
         sd.deck_filler, "build_and_convert",
         lambda firm_name, research, deck_content, progress=None, personalization=None: {
-            "pptx_path": pptx_path, "pdf_path": "stale.pdf",
+            "pptx_path": pptx_path, "pdf_path": stale_pdf,
             "fill_data": {"aum_value": "", "aum_label": "", "aum_asof": "",
                          "founded_year": "1970", "capital_stack": ""},
         },
     )
     convert_calls = []
-    monkeypatch.setattr(sd.deck_filler, "convert_to_pdf",
-                        lambda path, progress=None: convert_calls.append(path) or "fresh.pdf")
+
+    def fake_convert(path, progress=None):
+        convert_calls.append(pathlib.Path(path))
+        produced = pathlib.Path(path).with_suffix(".pdf")
+        produced.write_bytes(b"%PDF-1.4 fresh post-patch render\n")
+        return produced
+
+    monkeypatch.setattr(sd.deck_filler, "convert_to_pdf", fake_convert)
 
     result = sd._generate_deck("Acme Capital", {}, progress=lambda m: None)
 
-    assert result == "fresh.pdf"
-    assert convert_calls == [pptx_path]
+    assert result == str(stale_pdf)
+    assert stale_pdf.read_bytes() == b"%PDF-1.4 fresh post-patch render\n"
+    assert [p.name for p in convert_calls] == [pptx_path.name]
+    assert convert_calls[0].parent.name.startswith(".wd_pdf_")
     assert "Shape 4" not in _shape_names(pptx_path)
 
 
@@ -2462,4 +2477,249 @@ def test_footer_uses_the_display_label_on_the_live_rows():
         f"Real Estate{sd._FOOTER_SEPARATOR}Fund operations and back-office finance"
     assert sd.footer_focus_text("", "Real Estate", "Property Accounting") == \
         f"Real Estate{sd._FOOTER_SEPARATOR}Property accounting"
+
+
+
+# ---------------------------------------------------------------------------
+# Reconversion after the shape pass (run-31).
+#
+# The bug: `pdf_path = convert_to_pdf(pptx) or pdf_path`. convert_to_pdf writes
+# to pptx.parent/(pptx.stem + ".pdf") -- the SAME path build_and_convert
+# already wrote -- so on failure the `or` handed back a file that was still the
+# PRE-PATCH render. A Neal deck shipped a PPTX with the populated footer while
+# its PDF at that path still showed a valueless "Capital stack complexity:", a
+# dangling "Investing since", and all five slide-04 rows undeleted.
+#
+# Reproduced trigger: an open handle on the output .pdf. Plain back-to-back
+# conversion is fine, and a lingering soffice instance was tested and is NOT
+# the cause. These tests fake convert_to_pdf so they are fast and do not need
+# soffice; the real trigger was verified separately against a live conversion.
+# ---------------------------------------------------------------------------
+def _fake_convert_writing(content=b"%PDF-1.4 fresh\n"):
+    """Stands in for deck_filler.convert_to_pdf: writes a PDF next to whatever
+    pptx it is handed (i.e. inside the staging directory) and returns it."""
+    def convert(pptx_path, progress=None):
+        produced = pathlib.Path(pptx_path).with_suffix(".pdf")
+        produced.write_bytes(content)
+        return produced
+    return convert
+
+
+def _staged_deck(tmp_path, pdf_bytes=b"%PDF-1.4 STALE pre-patch render\n"):
+    pptx = tmp_path / "XAnalyst_Firm_Pitch.pptx"
+    pptx.write_bytes(b"PK\x03\x04 pptx bytes")
+    pdf = tmp_path / "XAnalyst_Firm_Pitch.pdf"
+    pdf.write_bytes(pdf_bytes)
+    return pptx, pdf
+
+
+def _staging_dirs(tmp_path):
+    return [p.name for p in tmp_path.iterdir() if p.name.startswith(".wd_pdf_")]
+
+
+def test_reconvert_replaces_the_pdf_on_success(tmp_path, monkeypatch):
+    pptx, pdf = _staged_deck(tmp_path)
+    monkeypatch.setattr(sd.deck_filler, "convert_to_pdf", _fake_convert_writing())
+
+    result = sd._reconvert_deck_pdf(pptx, pdf, "Firm", lambda m: None)
+
+    assert result == str(pdf)
+    assert pdf.read_bytes() == b"%PDF-1.4 fresh\n"      # the stale render is gone
+    assert _staging_dirs(tmp_path) == []
+
+
+def test_reconvert_returns_none_and_deletes_the_stale_pdf_when_conversion_fails(tmp_path, monkeypatch):
+    """The core invariant: never hand back a path to a file that does not
+    reflect the patched PPTX."""
+    pptx, pdf = _staged_deck(tmp_path)
+    monkeypatch.setattr(sd.deck_filler, "convert_to_pdf", lambda pptx_path, progress=None: None)
+
+    result = sd._reconvert_deck_pdf(pptx, pdf, "Firm", lambda m: None)
+
+    assert result is None
+    assert not pdf.exists()
+    assert _staging_dirs(tmp_path) == []
+
+
+def test_reconvert_never_returns_the_stale_path(tmp_path, monkeypatch):
+    """Stated as its own test because this is the exact regression: the old
+    `convert_to_pdf(...) or pdf_path` returned this very path."""
+    pptx, pdf = _staged_deck(tmp_path)
+    stale = str(pdf)
+    monkeypatch.setattr(sd.deck_filler, "convert_to_pdf", lambda pptx_path, progress=None: None)
+
+    assert sd._reconvert_deck_pdf(pptx, pdf, "Firm", lambda m: None) != stale
+
+
+def test_reconvert_returns_none_when_the_produced_file_is_empty(tmp_path, monkeypatch):
+    """rc=0 with a zero-byte output is not a successful conversion."""
+    pptx, pdf = _staged_deck(tmp_path)
+    monkeypatch.setattr(sd.deck_filler, "convert_to_pdf", _fake_convert_writing(b""))
+
+    result = sd._reconvert_deck_pdf(pptx, pdf, "Firm", lambda m: None)
+
+    assert result is None
+    assert not pdf.exists()
+
+
+def test_reconvert_returns_none_when_convert_reports_a_path_that_does_not_exist(tmp_path, monkeypatch):
+    """convert_to_pdf's own success test is `rc != 0 or not pdf.exists()`, and
+    the previous render sits at that exact path, so its truthy return is not by
+    itself evidence a file was written. Verified independently here."""
+    pptx, pdf = _staged_deck(tmp_path)
+    monkeypatch.setattr(sd.deck_filler, "convert_to_pdf",
+                        lambda pptx_path, progress=None: tmp_path / "never_written.pdf")
+
+    result = sd._reconvert_deck_pdf(pptx, pdf, "Firm", lambda m: None)
+
+    assert result is None
+    assert not pdf.exists()
+
+
+def test_reconvert_returns_none_when_conversion_raises(tmp_path, monkeypatch):
+    pptx, pdf = _staged_deck(tmp_path)
+
+    def boom(pptx_path, progress=None):
+        raise RuntimeError("soffice exploded")
+
+    monkeypatch.setattr(sd.deck_filler, "convert_to_pdf", boom)
+
+    result = sd._reconvert_deck_pdf(pptx, pdf, "Firm", lambda m: None)
+
+    assert result is None
+    assert not pdf.exists()
+    assert _staging_dirs(tmp_path) == []
+
+
+def test_reconvert_logs_the_failure_through_progress(tmp_path, monkeypatch):
+    """HARD RULE 4, and the whole point of this fix: this class of bug must
+    never be silent."""
+    pptx, pdf = _staged_deck(tmp_path)
+    monkeypatch.setattr(sd.deck_filler, "convert_to_pdf", lambda pptx_path, progress=None: None)
+    progressed = []
+
+    sd._reconvert_deck_pdf(pptx, pdf, "Neal Communities", progressed.append)
+
+    joined = " | ".join(progressed)
+    assert "Neal Communities" in joined
+    assert "no longer matches" in joined
+    assert "WITHOUT a deck" in joined
+    assert "stale" in joined
+
+
+def test_reconvert_logs_the_success_too(tmp_path, monkeypatch):
+    pptx, pdf = _staged_deck(tmp_path)
+    monkeypatch.setattr(sd.deck_filler, "convert_to_pdf", _fake_convert_writing())
+    progressed = []
+
+    sd._reconvert_deck_pdf(pptx, pdf, "Neal Communities", progressed.append)
+
+    assert any("reconverted to match the patched PPTX" in m for m in progressed)
+
+
+def test_reconvert_works_when_there_was_no_prior_pdf(tmp_path, monkeypatch):
+    """build_and_convert can return pdf_path=None (no soffice on the box). The
+    target is then derived from the pptx, and there is no stale file to drop."""
+    pptx, pdf = _staged_deck(tmp_path)
+    pdf.unlink()
+    monkeypatch.setattr(sd.deck_filler, "convert_to_pdf", _fake_convert_writing())
+
+    result = sd._reconvert_deck_pdf(pptx, None, "Firm", lambda m: None)
+
+    assert result == str(pdf)
+    assert pdf.read_bytes() == b"%PDF-1.4 fresh\n"
+
+
+def test_reconvert_survives_an_undeletable_stale_pdf(tmp_path, monkeypatch):
+    """If the stale file cannot be removed (the live trigger is an open handle,
+    which also blocks unlink), it still must not be returned."""
+    pptx, pdf = _staged_deck(tmp_path)
+    monkeypatch.setattr(sd.deck_filler, "convert_to_pdf", lambda pptx_path, progress=None: None)
+    real_unlink = pathlib.Path.unlink
+
+    def refuse(self, *a, **kw):
+        if self.name.endswith(".pdf"):
+            raise OSError(32, "in use by another process")
+        return real_unlink(self, *a, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "unlink", refuse)
+    progressed = []
+
+    result = sd._reconvert_deck_pdf(pptx, pdf, "Firm", progressed.append)
+
+    assert result is None
+    assert any("still on disk" in m for m in progressed)
+
+
+# --- through _generate_deck ------------------------------------------------
+def _wire_deck_build(monkeypatch, pptx, pdf, patched):
+    monkeypatch.setattr(sd.deck_filler, "get_deck_content",
+                        lambda firm_name, research, personalization: {
+                            "profile_bullets": [], "fit_paragraphs": {}})
+    monkeypatch.setattr(
+        sd.deck_filler, "build_and_convert",
+        lambda firm_name, research, deck_content, progress=None, personalization=None: {
+            "pptx_path": pptx, "pdf_path": pdf, "fill_data": {}})
+    monkeypatch.setattr(sd, "_delete_empty_deck_shapes",
+                        lambda *a, **kw: patched)
+
+
+def test_generate_deck_returns_none_when_reconversion_fails_after_patching(tmp_path, monkeypatch):
+    """End to end: a patched PPTX must never ship the pre-patch PDF."""
+    pptx, pdf = _staged_deck(tmp_path)
+    _wire_deck_build(monkeypatch, pptx, pdf, patched=True)
+    monkeypatch.setattr(sd.deck_filler, "convert_to_pdf", lambda pptx_path, progress=None: None)
+    progressed = []
+
+    result = sd._generate_deck("Firm", {}, progress=progressed.append)
+
+    assert result is None
+    assert not pdf.exists()
+    assert any("WITHOUT a deck" in m for m in progressed)
+
+
+def test_generate_deck_uses_the_reconverted_pdf_when_patching_succeeded(tmp_path, monkeypatch):
+    pptx, pdf = _staged_deck(tmp_path)
+    _wire_deck_build(monkeypatch, pptx, pdf, patched=True)
+    monkeypatch.setattr(sd.deck_filler, "convert_to_pdf", _fake_convert_writing())
+
+    result = sd._generate_deck("Firm", {}, progress=lambda m: None)
+
+    assert result == str(pdf)
+    assert pdf.read_bytes() == b"%PDF-1.4 fresh\n"
+
+
+def test_generate_deck_keeps_the_original_pdf_when_nothing_was_patched(tmp_path, monkeypatch):
+    """No patch means the existing PDF still reflects the PPTX, so it is kept
+    and no reconversion is attempted."""
+    pptx, pdf = _staged_deck(tmp_path)
+    _wire_deck_build(monkeypatch, pptx, pdf, patched=False)
+    calls = []
+    monkeypatch.setattr(sd.deck_filler, "convert_to_pdf",
+                        lambda pptx_path, progress=None: calls.append(pptx_path))
+
+    result = sd._generate_deck("Firm", {}, progress=lambda m: None)
+
+    assert result == str(pdf)
+    assert pdf.exists()
+    assert calls == []
+
+
+def test_generate_deck_ships_the_original_pdf_when_the_shape_pass_itself_raises(tmp_path, monkeypatch):
+    """A cleanup that raised before writing leaves the PPTX unpatched, so the
+    original PDF is still honest -- distinct from a patch that succeeded and a
+    reconversion that failed."""
+    pptx, pdf = _staged_deck(tmp_path)
+    _wire_deck_build(monkeypatch, pptx, pdf, patched=False)
+
+    def boom(*a, **kw):
+        raise RuntimeError("bad zip")
+
+    monkeypatch.setattr(sd, "_delete_empty_deck_shapes", boom)
+    progressed = []
+
+    result = sd._generate_deck("Firm", {}, progress=progressed.append)
+
+    assert result == str(pdf)
+    assert any("shipping the deck as generated" in m for m in progressed)
 

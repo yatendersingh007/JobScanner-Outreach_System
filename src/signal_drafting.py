@@ -1678,6 +1678,102 @@ def _drop_bad_profile_bullets(bullets: list, oneliner: str,
     return kept, dropped
 
 
+# ---------------------------------------------------------------------------
+# Reconversion after the shape pass (run-31).
+#
+# The bug this replaces: `pdf_path = convert_to_pdf(pptx) or pdf_path`. The
+# vendored convert_to_pdf writes to `pptx.parent / (pptx.stem + ".pdf")` --
+# the SAME path build_and_convert already wrote -- so on failure the `or`
+# fell back to a file that was still the PRE-PATCH render. A Neal deck shipped
+# with a PPTX containing the populated footer while its PDF at the same path
+# still showed "Capital stack complexity:" with no value, a dangling
+# "Investing since", and all five slide-04 rows undeleted.
+#
+# Reproduced, and the trigger is narrower than it looked:
+#
+#   - Plain back-to-back conversion is FINE. Converting, patching the pptx and
+#     converting again rewrites the PDF (rc=0, new sha). So neither "collides
+#     with the existing output file" nor "soffice refuses to overwrite" is the
+#     cause on its own.
+#   - A LINGERING soffice instance is NOT the cause either. With a background
+#     `soffice --headless` holding the user profile, the second conversion
+#     still succeeded and rewrote the file. Tested, negative.
+#   - AN OPEN HANDLE ON THE OUTPUT PDF IS the cause. With the target .pdf held
+#     open (a PDF viewer, a sync client, anything that reads the last-written
+#     deck), the wrapper exits rc=1, convert_to_pdf returns None, and the
+#     stale file stays on disk untouched.
+#
+# convert_to_pdf does emit a progress line in that case, but it reads "PDF
+# conversion failed (rc=1); shipping the deck without a PDF conversion." --
+# which was then false: the `or` shipped a stale PDF, so the operator was told
+# there was no PDF while a wrong one went out attached to the draft.
+#
+# There is also a latent second failure mode the fix has to be robust to:
+# convert_to_pdf's success test is `rc != 0 or not pdf_path.exists()`, and
+# because the previous render already sits at that exact path, exists() can
+# never detect a conversion that returned rc=0 without writing anything. Its
+# truthy return is therefore not by itself evidence the file is fresh.
+#
+# So: convert into a private temp directory where nothing can be stale and
+# exists() means what it says, then move the result over the original only on
+# success. On failure, delete the stale PDF and return None -- a draft with no
+# deck is honest, a draft with a deck that misrepresents the firm is not.
+def _reconvert_deck_pdf(pptx_path, pdf_path, firm_name: str,
+                        progress: Progress) -> Optional[str]:
+    """The path of a PDF that genuinely reflects `pptx_path`, or None.
+
+    Never returns a path to a file it did not just produce. On failure the
+    stale PDF is removed, so no later step (or human) can pick it up."""
+    import os as _os
+    import shutil as _shutil
+    import tempfile as _tempfile
+    from pathlib import Path as _Path
+
+    pptx_path = _Path(pptx_path)
+    target = _Path(pdf_path) if pdf_path else pptx_path.with_suffix(".pdf")
+
+    def _drop_stale(reason: str) -> None:
+        progress(f"{firm_name}: {reason} The deck PPTX was patched, so the existing PDF no "
+                 f"longer matches it. Drafting WITHOUT a deck rather than attaching a stale one.")
+        try:
+            if target.exists():
+                target.unlink()
+                progress(f"{firm_name}: removed the stale deck PDF at {target}.")
+        except OSError as e:
+            progress(f"{firm_name}: could not remove the stale deck PDF at {target} ({e}). "
+                     "It is NOT attached to the draft, but it is still on disk.")
+
+    # Temp dir alongside the target, not in %TEMP%: os.replace cannot move
+    # across volumes on Windows, and the decks directory may well be on a
+    # different one.
+    try:
+        staging = _tempfile.mkdtemp(prefix=".wd_pdf_", dir=str(target.parent))
+    except OSError as e:
+        _drop_stale(f"could not create a staging directory for PDF reconversion ({e}).")
+        return None
+
+    try:
+        staged_pptx = _Path(staging) / pptx_path.name
+        _shutil.copy2(pptx_path, staged_pptx)
+        produced = deck_filler.convert_to_pdf(staged_pptx, progress=progress)
+        if not produced:
+            _drop_stale("PDF reconversion failed (soffice returned no output).")
+            return None
+        produced = _Path(produced)
+        if not produced.exists() or produced.stat().st_size == 0:
+            _drop_stale("PDF reconversion produced no usable file.")
+            return None
+        _os.replace(produced, target)
+    except Exception as e:  # noqa: BLE001 - any failure here must not ship a stale PDF
+        _drop_stale(f"PDF reconversion failed ({e}).")
+        return None
+    finally:
+        _shutil.rmtree(staging, ignore_errors=True)
+
+    progress(f"{firm_name}: deck PDF reconverted to match the patched PPTX.")
+    return str(target)
+
+
 def _generate_deck(firm_name: str, research: dict, progress: Progress,
                    category: str = "", subcategory: str = "",
                    icp_reason: str = "") -> Optional[str]:
@@ -1708,13 +1804,19 @@ def _generate_deck(firm_name: str, research: dict, progress: Progress,
         return None
 
     pdf_path = result.get("pdf_path")
+    pptx_path = result.get("pptx_path")
+    fill_data = result.get("fill_data") or {}
     try:
-        pptx_path = result.get("pptx_path")
-        fill_data = result.get("fill_data") or {}
-        if pptx_path and _delete_empty_deck_shapes(pptx_path, fill_data, category, subcategory):
-            pdf_path = deck_filler.convert_to_pdf(pptx_path, progress=progress) or pdf_path
-    except Exception as e:  # noqa: BLE001 - a shape-cleanup failure ships the un-cleaned deck, not none
+        patched = bool(pptx_path) and _delete_empty_deck_shapes(
+            pptx_path, fill_data, category, subcategory)
+    except Exception as e:  # noqa: BLE001 - a cleanup failure ships the un-cleaned deck, not none
         progress(f"{firm_name}: empty-shape cleanup failed ({e}); shipping the deck as generated.")
+        patched = False
+
+    # Once the PPTX has been patched the existing PDF is stale by definition,
+    # so this is the ONLY branch allowed to keep it -- and it doesn't.
+    if patched:
+        pdf_path = _reconvert_deck_pdf(pptx_path, pdf_path, firm_name, progress)
 
     return str(pdf_path) if pdf_path else None
 

@@ -2779,3 +2779,116 @@ them: four bullets each, tiles populated, footer populated, no repetition.
 removed bullet, the new top-up ordering and the display labels. No vendored
 `.py` file touched. No scan command run.
 
+
+## Fix: a patched PPTX could ship an unpatched PDF - 2026-08-13
+
+`_generate_deck` ended with `pdf_path = deck_filler.convert_to_pdf(pptx_path,
+progress=progress) or pdf_path`. The vendored `convert_to_pdf` writes to
+`pptx_path.parent / (pptx_path.stem + ".pdf")` -- the SAME path
+`build_and_convert` already wrote -- so when reconversion failed, the `or`
+handed back a file that was still the PRE-PATCH render. Live symptom: a Neal
+deck whose PPTX carried the populated footer while its PDF at that same path
+still showed a valueless "Capital stack complexity:", a dangling "Investing
+since", and all five slide-04 rows undeleted.
+
+### Report: why the second conversion fails
+
+Reproduced against live soffice. The trigger is narrower than it looked, and
+two of the three hypotheses are negative.
+
+**Collision with the existing output file: NOT the cause.** Convert, patch the
+pptx, convert again in the same directory: rc=0 both times, and the PDF is
+rewritten (sha changes, 292,998 -> 283,919 bytes). soffice overwrites its own
+output happily.
+
+**A lingering soffice instance holding the profile lock: NOT the cause.**
+Tested directly, with a background `soffice --headless --norestore --nologo
+--nodefault` confirmed present in `tasklist` for the duration. The second
+conversion still succeeded in 4.2s and rewrote the file. On this LibreOffice
+build, single-instance delegation does not silently no-op.
+
+**An open handle on the output PDF IS the cause.** With the target `.pdf` held
+open (`msvcrt.locking` on the real file), the wrapper exits **rc=1**,
+`convert_to_pdf` returns `None`, and the stale file stays on disk untouched.
+That is the reproduction of the live failure.
+
+And the trigger is completely mundane in practice: **POWERPNT.EXE was running
+on this machine during the investigation** -- the operator reviewing the deck
+that was just generated is enough to lock it. The same run also failed to write
+the PPTX at all for the same reason (`[Errno 13] Permission denied` on
+`generated_decks_c/XAnalyst_Neal_..._Pitch.pptx`), which `_generate_deck`'s
+outer handler caught and reported correctly.
+
+**On "no log line":** `convert_to_pdf` does emit one, but it reads *"PDF
+conversion failed (rc=1); shipping the deck without a PDF conversion."* In this
+call site that was actively false -- the `or` then shipped a stale PDF, so the
+operator was told there was no PDF while a wrong one went out attached to the
+draft. Worse than silence.
+
+**A second, latent failure mode** the fix also had to be robust to:
+`convert_to_pdf`'s success test is `rc != 0 or not pdf_path.exists()`. Because
+the previous render already sits at exactly that path, `exists()` can never
+detect a conversion that returned rc=0 without writing. Its truthy return is
+not by itself evidence the file is fresh, so the new code does not trust it.
+
+### The fix
+
+`_reconvert_deck_pdf(pptx_path, pdf_path, firm_name, progress)`:
+
+1. Creates a private staging directory **alongside the target**, not in
+   `%TEMP%` -- `os.replace` cannot move across volumes on Windows and the decks
+   directory may be on a different one.
+2. Copies the patched PPTX in and converts THERE, where nothing is stale and
+   `exists()` means what it says.
+3. Requires the produced file to exist and be non-empty.
+4. `os.replace`s it over the original only then.
+5. On any failure: deletes the stale PDF and returns `None`.
+6. Cleans up the staging directory in a `finally`, on both paths.
+
+`_generate_deck` now computes `patched` first and reconverts only when the
+PPTX was actually rewritten. A shape pass that RAISED leaves the PPTX
+unpatched, so the original PDF is still honest and is kept -- that case is
+distinct from a patch that succeeded and a reconversion that failed, and the
+two are now separate branches rather than one `try` with an `or` at the end.
+
+A side benefit of converting in a staging dir: the reconversion now SUCCEEDS
+even when the target PDF is locked, because soffice writes to an unlocked path.
+Only the final move fails in that case. So the locked-file trigger degrades
+from "ships a stale deck" to "ships no deck", and often to "works".
+
+If the stale PDF cannot be deleted (an open handle blocks `unlink` too), that
+is reported explicitly -- "It is NOT attached to the draft, but it is still on
+disk" -- and the path is still not returned. The guarantee is about what gets
+attached, which is enforceable; deleting a file another process holds is not.
+
+### Verified
+
+End to end against real soffice, on Neal's live `wd_firms` row, with output
+redirected to a scratch directory (the real one was locked by PowerPoint):
+
+```
+_generate_deck returned: .../XAnalyst_Neal_..._Pitch.pdf
+   slide 01 composed 4 bullet(s) from research fields.
+   deck PDF reconverted to match the patched PPTX.
+
+PPTX slide3 : Shape 12 present=True   footer text present=True
+PPTX slide3 : 'Investing since' removed=True
+PDF page3 has the footer text          : True
+PDF page3 has valueless 'Capital stack' : False
+PDF page3 has dangling 'Investing since': False
+>>> shipped PDF agrees with the patched PPTX: True
+staging dirs left behind: []
+```
+
+Slide 12 was checked shape-by-shape against the PDF text as well: all five fit
+rows had real paragraphs this run and all five are present in both. (An earlier
+heading-count check reported "1 of 5" -- that was a bad check, because the PDF
+wraps each heading across two lines. Not a defect.)
+
+694 tests pass, up from 680. One pre-existing test was written to the old
+contract -- its fake `convert_to_pdf` returned the string `"fresh.pdf"` without
+creating a file, which the new existence check correctly rejects. Updated to
+write a real file and to assert the returned path is the one the fresh file was
+MOVED to, plus that the converter was handed a staged copy. No vendored `.py`
+file touched. No scan command run.
+
