@@ -3288,3 +3288,133 @@ copies, as a real SELECT does, so the fake `gate_group` had to write back by id
 the way `update_wd_firm` does. No vendored `.py` file touched. No scan command
 run.
 
+
+## Blocklist maintenance: auto-block staffing firms, suggest the rest - 2026-08-17
+
+The run-27 funnel audit found 69% of gate spend going to firms disqualified as
+"Not an accepted firm type". The blocklist is the free check that stops them,
+and it was being maintained by hand from audit findings. This closes the loop.
+
+### Two tiers
+
+**AUTO, no confirmation.** The firm's own research one-liner says it is a
+staffing, recruiting, talent-placement or executive-search firm. That is not a
+judgement about fit; it is the firm describing itself as an intermediary, and an
+intermediary is never someone X Analyst can place embedded staff with.
+
+**NOTIFY, no action.** Accounting, advisory and consultancy self-descriptions.
+Genuinely ambiguous: a real estate family office can describe itself as an
+advisory, and LG Legacy Group's live one-liner ("Accounting and tax advisory for
+businesses and real estate clients") is one keyword from a firm we would want.
+Suggested with `/block "Name"` to accept.
+
+**NEVER, either tier: an AUM-ground disqualification.** An AUM misread is
+recoverable (the verdict cache expires, /qualify overrides); a blocklist entry
+silently removes the firm from every future run and nothing re-tests it.
+Enforced twice: the firm-type reason is required, AND any AUM-shaped reason is
+rejected outright, so a reason carrying both leaves the firm alone.
+
+**The evidence is always the firm's own one-liner, never posting text.**
+icp_gate's `firm_oneliner` describes the firm; a job description describes
+whoever the job is for, which for a recruiter is its CLIENT. Reading a posting
+would auto-block a real estate operator whose posting said "agency experience
+preferred". A test asserts posting text is ignored even when it is on the row.
+
+### Live behaviour, run against all 90 firms in wd_firms
+
+```
+AUTO   Addison Group      "Staffing and professional talent solutions firm (recruiting, consulting)"
+       Incendia Partners  "talent acquisition and recruiting firm (non-real-estate)"
+NOTIFY CPA firm           "Accounting services firm, professional services"
+REJECTED by a safety check: 12
+```
+
+Both auto-adds are correct and neither is in the blocklist today, so the next
+run will add them. The twelve rejections are the checks earning their place:
+ten `already_covered_by` (Guidehouse, Henderson Harbor Group, PrideStaff,
+Executive Alliance, W3Global, Aston Carter, EisnerAmper and others), and
+**Wealthspire blocked by check 1** because it is PARKED in wd_firms and its
+one-liner is advisory-shaped. Without check 1 the loop would have suggested
+blocking a firm still under consideration.
+
+Firms correctly ignored despite being firm-type disqualifications, because
+their one-liners describe an operator rather than an intermediary: Chipotle,
+JPMorgan Chase, Sonic Automotive, Raptor Group, Blue Origin, Havtech, ABC
+Imaging, Nichols Contracting, UVIMCO, EliseAI, ReminderMedia.
+
+One conservative miss worth knowing: **Australia-Employment** is a job board and
+blocking it would be right, but its `firm_oneliner` is empty, so no tier fires.
+The rule is description-based by design; a name-based rule would have caught it
+and would also have caught real firms. Failing toward "no action" is the correct
+direction here.
+
+### The four mandatory safety checks
+
+1. **No fuzzy match against any firm ever qualified or parked.** Uses
+   `wd_poc._firm_matches`, the same containment-with-tolerable-extras compare
+   already trusted to decide whether an Apollo org is the firm we researched, so
+   "Choice NY" and "Choice New York Companies" collide while "Kairos Real Estate
+   Partners" and "Kairos Investment Management" stay distinct (FIX 28). Parked
+   counts as protected: a park means "could not decide", not "no".
+2. **At least two content tokens, or one of 8+ characters.** A blocklist entry
+   is matched as a substring against every future company name, so a bare
+   "Metro" would silently drop "Metro Real Estate Partners" forever. Tokens
+   that carry no identity ("and", "of", "the") do not count toward the two, so
+   "Klausner & Company PC" passes on `klausner` alone rather than on `and`.
+3. **No bare surname + Group/Capital/Partners** unless the description names
+   the firm's own type. That shape is how a family office named after its family
+   reads, and family offices are an explicit ICP category.
+4. **Nothing an existing entry already covers**, substring in both directions,
+   matching how `signal_pipeline._is_staffing` applies the list.
+
+**A dead-safeguard bug caught by its own test.** The first version of check 3's
+exemption reused the tier regexes, which made the exemption the same condition
+as candidacy: check 3 could never fire, and read like a safeguard while doing
+nothing. The test for it failed, which is how it surfaced. The exemption is now
+deliberately narrower: it requires the description to name the firm's own TYPE
+("a recruiting firm", "public accounting firm") rather than an activity it
+performs ("bookkeeping support for portfolio companies", which is exactly what
+an in-house family office finance team does).
+
+### The file editor
+
+Line-based, never a string replace on the document. Several blocklist entries
+are substrings of unrelated YAML elsewhere in the same file ("Talent" appears in
+TinyFish target names, "Search" in aggregator queries), so a replace could edit
+the wrong line. The insertion walk stops at the next mapping key, so an entry
+never lands in the section that follows.
+
+Every write is validated by re-parsing the result AND confirming the entry list
+changed exactly as intended; anything else restores the original bytes. Names
+that would change the document's meaning are quoted (`- "Zephyr: Advisors Co"`).
+Verified against a copy of the real 62-entry document: add, remove, and
+add-then-remove restoring the file byte for byte, plus a sabotaged write
+reverting byte for byte and still parsing.
+
+### Audit trail and recovery
+
+Every auto-add appends one line to BUILD_LOG.md carrying the run id, the name
+and the self-description evidence, marked `AUTO-BLOCK` so it is greppable. An
+audit-log failure never raises into the run: a completed run's verdicts and
+drafts are not worth losing to a log write.
+
+`/block "Name"` and `/unblock "Name"` are the manual controls over the same
+file, and `/blocklist` shows the last 10 entries. Auto-adds are undone with
+`/unblock` exactly like manual ones.
+
+Note this means a run mutates two git-tracked files. That is deliberate: an
+auto-add shows up in `git status`, is greppable in BUILD_LOG.md, and is
+reversible from Telegram, which is what makes an unconfirmed write acceptable.
+
+The whole maintenance step is wrapped so it can never fail a run: a
+config-file or database problem degrades to a progress line and an untouched
+blocklist.
+
+937 tests pass, up from 836. 90 in `tests/test_blocklist.py` (one rejection test
+per safety check, tier classification against live one-liners, the editor
+against a copy of the real config, audit trail) and 11 in
+`tests/test_bot_dispatch.py` for the three commands. Every editor test points
+`SCANNER_CONFIG_PATH` at a tmp_path copy, so the real config is never touched
+and the tests still exercise its actual shape. No vendored `.py` file touched.
+No scan command run.
+

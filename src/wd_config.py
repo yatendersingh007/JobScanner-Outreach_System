@@ -26,6 +26,9 @@ TEST_MODE = _bool("TEST_MODE", True)          # default-safe: real mode is opt-i
 
 # ── Scanner ───────────────────────────────────────────────────────────────
 SCANNER_CONFIG_PATH = os.getenv("SCANNER_CONFIG_PATH", str(ROOT / "scanner" / "config.yaml"))
+# Audit trail for auto-added blocklist entries (run-34), so a wrong add is
+# greppable and reversible rather than silent.
+BUILD_LOG_PATH = os.getenv("BUILD_LOG_PATH", str(ROOT / "BUILD_LOG.md"))
 
 # Sources that normally produce. Zero from one of these gets a connector-health
 # line in the summary (BRIEF 4.1): a board changing its markup thins TinyFish

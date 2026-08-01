@@ -15,10 +15,53 @@ import logging
 from types import SimpleNamespace
 from typing import Optional
 
-from . import signal_drafting, signal_pipeline, wd_config as config
+from . import blocklist, signal_drafting, signal_pipeline, wd_config as config
 from . import wd_telegram as tg
 
 log = logging.getLogger("workflow-d.run_scan")
+
+
+def _apply_blocklist_maintenance(result, progress) -> None:
+    """Auto-block self-described staffing firms, and collect suggestions for the
+    ambiguous rest. Runs after gating, on this run's own firms.
+
+    Never raises into the run. A config-file or audit-log problem is worth
+    reporting and worth leaving the blocklist unchanged over, but it is not
+    worth losing a completed run's verdicts and drafts to -- so every failure
+    degrades to a progress line and an untouched file.
+    """
+    dbc = signal_pipeline.dbc
+    try:
+        firms = dbc.firms_for_run(result.run_id)
+        protected = dbc.qualified_or_parked_firm_names()
+        entries = blocklist.read_entries(config.SCANNER_CONFIG_PATH)
+        auto, notify, rejected = blocklist.classify_firms(firms, protected, entries)
+    except Exception as e:  # noqa: BLE001 - suggestions are never worth a failed run
+        progress(f"Blocklist maintenance skipped ({type(e).__name__}: {e}).")
+        return
+
+    for candidate in rejected:
+        name, tier, failures = candidate
+        log.info("blocklist candidate rejected: %s (%s) %s", name, tier, failures)
+
+    applied = []
+    for candidate in auto:
+        comment = (f"auto-added run {result.run_id}: "
+                   f"{' '.join((candidate.evidence or '').split())[:60]}")
+        try:
+            blocklist.add_entry(config.SCANNER_CONFIG_PATH, candidate.firm_name, comment)
+        except blocklist.BlocklistFileError as e:
+            progress(f"Could not auto-block {candidate.firm_name}: {e}")
+            continue
+        except Exception as e:  # noqa: BLE001
+            progress(f"Could not auto-block {candidate.firm_name} ({type(e).__name__}: {e}).")
+            continue
+        applied.append(candidate)
+
+    if applied:
+        blocklist.append_audit(config.BUILD_LOG_PATH, result.run_id, applied)
+    result.auto_blocked = [c.firm_name for c in applied]
+    result.blocklist_candidates = [c.firm_name for c in notify]
 
 
 def _run_drafting(result, progress) -> None:
@@ -90,6 +133,12 @@ def summarize(r, dry_hint: str = "--dry") -> str:
                       f"({', '.join(r.skipped_staffing[:5])})"]
     if r.skipped_uncategorized:
         lines.append(f"Uncategorized postings dropped: {r.skipped_uncategorized}")
+    if r.auto_blocked:
+        lines += ["", f"Auto-blocked {len(r.auto_blocked)} staffing firms: "
+                      f"{', '.join(r.auto_blocked)}"]
+    if r.blocklist_candidates:
+        lines += ["", "Blocklist candidates: " + ", ".join(r.blocklist_candidates)
+                      + '  /block "Name" to add']
     if r.connector_health:
         lines += ["", "CONNECTOR HEALTH: zero results from "
                       + ", ".join(r.connector_health)
@@ -161,6 +210,7 @@ def run_scan(mode: str, days: Optional[int] = None, dry: bool = False,
     """
     result = signal_pipeline.run(mode=mode, progress=progress, gate_cap=gate_cap,
                                  recency_days=days, dry=dry)
+    _apply_blocklist_maintenance(result, progress)
     if not dry and not result.cancelled:
         _run_drafting(result, progress)
     return result
@@ -322,6 +372,7 @@ def run_resume(dry: bool = False, progress=tg.progress):
             llm_tokens=result.llm_tokens,
             research_cost_usd=result.research_cost_usd,
         )
+        _apply_blocklist_maintenance(result, progress)
         if not dry and not result.cancelled:
             _run_drafting(result, progress)
         return result

@@ -311,6 +311,21 @@ def firms_for_run(run_id: int) -> list[dict]:
         return cur.fetchall()
 
 
+def qualified_or_parked_firm_names() -> list[str]:
+    """Every firm name ever QUALIFIED or PARKED, across all runs.
+
+    The protected set for blocklist auto-adds (run-34): a name that fuzzy-
+    matches one of these must never reach the blocklist, because a blocklist
+    entry silently removes the firm from every future run and nothing
+    re-tests it. Parked counts as protected -- a park is "we could not decide",
+    not "no".
+    """
+    with cursor() as cur:
+        cur.execute("SELECT DISTINCT firm_name FROM wd_firms "
+                    "WHERE icp_status IN ('qualified', 'parked') AND firm_name IS NOT NULL")
+        return [r["firm_name"] for r in cur.fetchall()]
+
+
 def parked_firms(run_id: Optional[int] = None) -> list[dict]:
     with cursor() as cur:
         if run_id is not None:

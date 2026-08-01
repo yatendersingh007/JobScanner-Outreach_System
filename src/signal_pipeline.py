@@ -128,6 +128,10 @@ class RunResult:
     # silent truncation -- see scanner/connectors/tinyfish.py's local edit.
     tinyfish_skipped: list = field(default_factory=list)
     tinyfish_steps_launched: int = 0
+    # Blocklist maintenance (run-34). auto_blocked went into scanner/config.yaml
+    # without confirmation; blocklist_candidates are suggestions only.
+    auto_blocked: list = field(default_factory=list)
+    blocklist_candidates: list = field(default_factory=list)
 
 
 _WS_RE = re.compile(r"\s+")

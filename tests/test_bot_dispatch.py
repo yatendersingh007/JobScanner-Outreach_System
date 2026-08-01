@@ -588,3 +588,119 @@ def test_resume_reports_run_already_in_progress_distinctly_from_a_crash(monkeypa
 
     assert "Another Workflow D run is already in progress." in wire.sent
     assert wire.finished == []
+
+
+# ---------------------------------------------------------------------------
+# /block, /unblock, /blocklist (run-34). The auto tier writes to
+# scanner/config.yaml with no confirmation; these are the operator's manual
+# controls over the same file. Each test points SCANNER_CONFIG_PATH at a copy
+# of the real document, so the real one is never touched and the tests still
+# exercise its actual shape.
+# ---------------------------------------------------------------------------
+import shutil as _shutil  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+from src import blocklist as _bl  # noqa: E402
+
+_REAL_CONFIG = _Path(__file__).resolve().parents[1] / "scanner" / "config.yaml"
+
+
+@pytest.fixture
+def cfg_copy(tmp_path, monkeypatch):
+    dest = tmp_path / "config.yaml"
+    _shutil.copy(_REAL_CONFIG, dest)
+    monkeypatch.setattr(bot.config, "SCANNER_CONFIG_PATH", str(dest))
+    monkeypatch.setattr(bot.dbc, "latest_wd_run", lambda: {"id": 34})
+    return dest
+
+
+def test_block_adds_the_entry_and_reports(cfg_copy, wire):
+    before = len(_bl.read_entries(cfg_copy))
+
+    bot._dispatch('/block "Addison Group"')
+
+    entries = _bl.read_entries(cfg_copy)
+    assert entries[-1] == "Addison Group"
+    assert len(entries) == before + 1
+    assert 'Blocked "Addison Group"' in wire.sent[0]
+    assert "/unblock" in wire.sent[0]
+
+
+def test_block_writes_the_run_id_comment(cfg_copy, wire):
+    bot._dispatch('/block "Addison Group"')
+
+    line = next(l for l in cfg_copy.read_text(encoding="utf-8").splitlines()
+                if "Addison Group" in l)
+    assert "# added via /block, run 34" in line
+
+
+def test_block_without_a_name_shows_usage(cfg_copy, wire):
+    bot._dispatch("/block")
+    assert "Usage: /block" in wire.sent[0]
+
+
+def test_block_reports_a_duplicate_without_writing(cfg_copy, wire):
+    original = cfg_copy.read_text(encoding="utf-8")
+
+    bot._dispatch('/block "Vaco"')
+
+    assert "already covered" in wire.sent[0]
+    assert cfg_copy.read_text(encoding="utf-8") == original
+
+
+def test_unblock_removes_the_entry(cfg_copy, wire):
+    bot._dispatch('/block "Addison Group"')
+    wire.sent.clear()
+
+    bot._dispatch('/unblock "Addison Group"')
+
+    assert "Addison Group" not in _bl.read_entries(cfg_copy)
+    assert 'Unblocked "Addison Group"' in wire.sent[0]
+
+
+def test_block_then_unblock_restores_the_file_byte_for_byte(cfg_copy, wire):
+    original = cfg_copy.read_text(encoding="utf-8")
+
+    bot._dispatch('/block "Addison Group"')
+    bot._dispatch('/unblock "Addison Group"')
+
+    assert cfg_copy.read_text(encoding="utf-8") == original
+
+
+def test_unblock_reports_a_name_that_is_not_an_entry(cfg_copy, wire):
+    bot._dispatch('/unblock "Never Existed Co"')
+    assert "not a blocklist entry" in wire.sent[0]
+
+
+def test_unblock_without_a_name_shows_usage(cfg_copy, wire):
+    bot._dispatch("/unblock")
+    assert "Usage: /unblock" in wire.sent[0]
+
+
+def test_blocklist_shows_the_last_ten_entries(cfg_copy, wire):
+    entries = _bl.read_entries(cfg_copy)
+
+    bot._dispatch("/blocklist")
+
+    message = wire.sent[0]
+    assert f"{len(entries)} entries" in message
+    assert message.count("\n") >= 10
+    for entry in entries[-10:]:
+        assert str(entry) in message
+    assert entries[0] not in message.splitlines()[1:]      # not the whole list
+
+
+def test_blocklist_reports_a_read_failure_instead_of_raising(monkeypatch, wire):
+    monkeypatch.setattr(bot.config, "SCANNER_CONFIG_PATH", "no/such/file.yaml")
+
+    bot._dispatch("/blocklist")
+
+    assert "Could not read the blocklist" in wire.sent[0]
+
+
+def test_the_new_commands_are_in_the_help_text():
+    help_text = bot._help_text()
+    assert "/block " in help_text
+    assert "/unblock " in help_text
+    assert "/blocklist " in help_text
+

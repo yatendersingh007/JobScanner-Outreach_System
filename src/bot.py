@@ -24,7 +24,7 @@ from typing import Optional
 import requests
 
 from lib_referral import config as gate_config
-from . import wd_config as config, wd_dbc as dbc, wd_telegram as tg
+from . import blocklist, wd_config as config, wd_dbc as dbc, wd_telegram as tg
 from .run_scan import run_resume, run_scan, run_single_firm, summarize
 
 log = logging.getLogger("workflow-d.bot")
@@ -359,6 +359,64 @@ def _handle_qualify(arg: str) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Blocklist commands (run-34). The auto tier writes without asking; these are
+# the operator's manual controls over the same file: accept a suggestion, undo
+# anything (including an auto-add), and see what is in there.
+# ---------------------------------------------------------------------------
+def _handle_block(arg: str) -> None:
+    firm, _rest = parse_quoted(arg)
+    if not firm:
+        tg.send('Usage: /block "<Firm>"')
+        return
+    run = dbc.latest_wd_run()
+    run_id = run["id"] if run else "manual"
+    try:
+        entries = blocklist.add_entry(
+            config.SCANNER_CONFIG_PATH, firm, f"added via /block, run {run_id}")
+    except blocklist.BlocklistFileError as e:
+        tg.send(f'Could not block "{firm}": {e}')
+        return
+    except Exception as e:  # noqa: BLE001
+        tg.send(f'Could not block "{firm}" ({type(e).__name__}: {e}).')
+        return
+    tg.send(f'Blocked "{firm}". {len(entries)} entries now. It is dropped before '
+            f'the gate from the next run on. /unblock "{firm}" to undo.')
+
+
+def _handle_unblock(arg: str) -> None:
+    firm, _rest = parse_quoted(arg)
+    if not firm:
+        tg.send('Usage: /unblock "<Firm>"')
+        return
+    try:
+        entries = blocklist.remove_entry(config.SCANNER_CONFIG_PATH, firm)
+    except blocklist.BlocklistFileError as e:
+        tg.send(f'Could not unblock "{firm}": {e}')
+        return
+    except Exception as e:  # noqa: BLE001
+        tg.send(f'Could not unblock "{firm}" ({type(e).__name__}: {e}).')
+        return
+    tg.send(f'Unblocked "{firm}". {len(entries)} entries now. It can be gated '
+            "again from the next run on.")
+
+
+def _handle_blocklist() -> None:
+    try:
+        entries = blocklist.read_entries(config.SCANNER_CONFIG_PATH)
+    except Exception as e:  # noqa: BLE001
+        tg.send(f"Could not read the blocklist ({type(e).__name__}: {e}).")
+        return
+    if not entries:
+        tg.send("The blocklist is empty.")
+        return
+    tail = entries[-10:]
+    lines = [f"Blocklist: {len(entries)} entries. Last {len(tail)}:"]
+    lines += [f"  {e}" for e in tail]
+    lines.append('/block "Name" to add, /unblock "Name" to remove.')
+    tg.send(chr(10).join(lines))
+
+
 def _handle_disqualify(arg: str) -> None:
     firm, _rest = parse_quoted(arg)
     if not firm:
@@ -419,6 +477,9 @@ def _help_text() -> str:
         "/cancel (or /scan stop) - stop the active run cleanly, after the "
         "in-flight firm finishes\n"
         "/resume                - continue the latest crashed or cancelled run\n"
+        '/block "Firm"          - add Firm to the scanner blocklist\n'
+        '/unblock "Firm"        - remove Firm from the blocklist\n'
+        "/blocklist             - show the last 10 blocklist entries\n"
         "/help\n"
     )
 
@@ -451,6 +512,12 @@ def _dispatch(text: str, chat_id: Optional[str] = None) -> None:
         _handle_qualify(arg)
     elif cmd == "disqualify":
         _handle_disqualify(arg)
+    elif cmd == "block":
+        _handle_block(arg)
+    elif cmd == "unblock":
+        _handle_unblock(arg)
+    elif cmd == "blocklist":
+        _handle_blocklist()
     elif cmd in ("start", "help"):
         tg.send(_help_text())
     else:
