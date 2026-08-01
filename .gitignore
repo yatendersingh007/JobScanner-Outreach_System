@@ -49,3 +49,4 @@ seen.db.bak*
 tf_*.py
 title_signal_test.py
 trim_ca.py
+generated_decks_c/
