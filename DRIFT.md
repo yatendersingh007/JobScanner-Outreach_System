@@ -166,3 +166,13 @@ the same instance) all insert into the same table. A purely numeric prefix
 risks a future collision; every workflow-d migration should use the
 `wd_NNN_description.sql` convention going forward (referral-system's own
 migrations already carry a `wc_`/`workflow_c` marker in the filename).
+
+## tokens_used retry suppression (src/signal_drafting.py)
+
+_generate_deck sets deck_content["tokens_used"] = MAX_LLM_TOKENS_PER_FIRM to
+decline deck_filler's Part C retry, which otherwise rewrites genuinely-empty
+fit paragraphs into invented claims. This exploits the retry's own token-budget
+check, not a documented switch. If lib_referral/deck_filler.py changes how it
+gates that retry, fabrication silently returns. Re-verify after any deck_filler
+re-vendor: a firm with no fund structures must show an omitted row, not an
+invented paragraph.
