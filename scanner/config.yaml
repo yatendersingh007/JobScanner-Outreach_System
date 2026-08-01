@@ -104,6 +104,7 @@ connectors:
     provider: jsearch
     countries:
       - us
+      - ca
     queries:
       - property accountant
       - staff accountant
