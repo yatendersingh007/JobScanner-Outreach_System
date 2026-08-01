@@ -245,11 +245,35 @@ def run_resume(dry: bool = False, progress=tg.progress):
         )
         # Firms this run already decided before it crashed/was cancelled count
         # toward the summary; none of them are re-gated or re-drafted.
+        #
+        # THIS IS ALSO THE SKIP LIST, which it was not before (run-33 fix).
+        # wd_queue is the resume's only source of work, and signal_pipeline.run()
+        # enqueues once and never marks a row done -- so after a crash EVERY
+        # enqueued row is still 'pending', including every firm the first
+        # attempt already gated. next_pending() handed them all back and the
+        # loop re-gated them. Live evidence, run 32: 12 queue rows all pending,
+        # 4 firms already gated, and the resume produced a second wd_firms row
+        # for each (colliers 87/122, abc imaging 88/123, executive alliance
+        # 89/124, eisneramper 90/125) at 6 Tavily searches apiece.
+        #
+        # The verdict already on the row is the authority on whether a firm
+        # needs gating, not the queue's status. A non-NULL icp_status means
+        # decided; NULL means the process died mid-gate and it must be finished.
+        decided_keys: set = set()
+        needs_regate: dict = {}
         for firm in dbc.firms_for_run(run_id):
+            status = firm.get("icp_status")
             bucket = {"qualified": result.qualified, "disqualified": result.disqualified,
-                      "parked": result.parked}.get(firm.get("icp_status"))
+                      "parked": result.parked}.get(status)
             if bucket is not None:
                 bucket.append(firm)
+            if status:
+                decided_keys.add(firm.get("firm_key"))
+            else:
+                # In flight when the process died. Re-gated IN PLACE below:
+                # this row owns the run's posting_count and the wd_postings
+                # rows point at its id.
+                needs_regate[firm.get("firm_key")] = firm
         result.groups = len(result.qualified) + len(result.disqualified) + len(result.parked)
 
         cap = config.GATE_CAP_PER_RUN
@@ -257,6 +281,17 @@ def run_resume(dry: bool = False, progress=tg.progress):
         # rows for this run," which then gets split at `cap` below so the cap
         # guard still applies to a resumed run exactly as it does to a fresh one.
         all_pending = dbc.next_pending(run_id, limit=cap + 10_000)
+
+        # Reconcile the queue against the verdicts before the cap is applied, so
+        # a run whose first attempt already gated `cap` firms does not spend its
+        # whole resumed budget re-deciding them.
+        already_done = [q for q in all_pending if q["firm_key"] in decided_keys]
+        for q in already_done:
+            dbc.set_queue_status(q["id"], "done")
+        if already_done:
+            progress(f"Resuming: {len(already_done)} firm(s) already have a verdict for this "
+                     f"run, not re-gating them.")
+        all_pending = [q for q in all_pending if q["firm_key"] not in decided_keys]
         to_process, still_pending = all_pending[:cap], all_pending[cap:]
 
         for i, q in enumerate(to_process):
@@ -266,7 +301,8 @@ def run_resume(dry: bool = False, progress=tg.progress):
                 break
             progress(f"Resuming: gating {q['firm_name']} ({i + 1}/{len(to_process)})...")
             group = signal_pipeline.FirmGroup(firm_name=q["firm_name"], firm_key=q["firm_key"])
-            firm = signal_pipeline.gate_group(run_id, group, progress)
+            firm = signal_pipeline.gate_group(
+                run_id, group, progress, existing_firm=needs_regate.get(q["firm_key"]))
             dbc.set_queue_status(q["id"], "done", firm_id=firm["id"])
             result.groups += 1
             result.tavily_searches += firm.pop("_search_calls", 0) or 0

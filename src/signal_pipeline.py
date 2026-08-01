@@ -409,24 +409,37 @@ def acquired_by_parent_park_reason(research: dict) -> Optional[str]:
 # ---------------------------------------------------------------------------
 # Gate
 # ---------------------------------------------------------------------------
-def gate_group(run_id: int, group: FirmGroup, progress: Progress) -> dict:
+def gate_group(run_id: int, group: FirmGroup, progress: Progress,
+               existing_firm: Optional[dict] = None) -> dict:
     """Gate one firm and persist the verdict. Returns the wd_firms row.
 
     The gate is vendored unchanged from referral-system (icp_gate.py):
     research_and_gate(firm_name, progress) -> GateResult with icp_result in
     {qualified, disqualified, parked}. Its own-domain resolution and PARK-on-
     ambiguity behaviour is the FIX 28 protection and is not weakened here.
+
+    `existing_firm` re-gates IN PLACE into a wd_firms row that already exists,
+    instead of inserting a second one. It exists for /resume finishing a firm
+    that was in flight when the process died: that row already holds the run's
+    own posting_count/category/subcategory AND the wd_postings rows are linked
+    to it by firm_id, so replacing it would orphan them. Postings are not
+    re-inserted in that path -- the row already has them, and the FirmGroup a
+    resume reconstructs from wd_queue carries none (see run_scan.run_resume's
+    note on that gap). Default None is byte-for-byte today's behaviour.
     """
     from lib_referral import icp_gate
 
-    firm = dbc.create_wd_firm(
-        run_id, group.firm_name,
-        firm_key=group.firm_key,
-        category=group.category,
-        subcategory=group.subcategory,
-        posting_count=group.posting_count,
-    )
-    dbc.insert_postings(run_id, firm["id"], [_posting_row(p) for p in group.postings])
+    if existing_firm is not None:
+        firm = existing_firm
+    else:
+        firm = dbc.create_wd_firm(
+            run_id, group.firm_name,
+            firm_key=group.firm_key,
+            category=group.category,
+            subcategory=group.subcategory,
+            posting_count=group.posting_count,
+        )
+        dbc.insert_postings(run_id, firm["id"], [_posting_row(p) for p in group.postings])
 
     try:
         res = icp_gate.research_and_gate(group.firm_name, progress)

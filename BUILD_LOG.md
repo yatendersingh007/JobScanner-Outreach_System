@@ -3155,3 +3155,136 @@ count-the-columns assertion.
 
 No vendored `.py` file touched. No scan command run.
 
+
+## /resume no longer re-gates firms that already have a verdict - 2026-08-16
+
+### Report 1: how the resume rebuilds its firm list, and what it read
+
+**The firm list comes entirely from `wd_queue`, never from `wd_firms`.**
+`run_resume` calls `dbc.next_pending(run_id, limit=cap + 10_000)`, which is
+`SELECT * FROM wd_queue WHERE run_id=%s AND status='pending' ORDER BY id`. That
+list, capped, is the gating loop.
+
+**It did read `wd_firms`, but only for the summary.** `dbc.firms_for_run(run_id)`
+at the top of the function pushed already-decided rows into
+`result.qualified/disqualified/parked` and set `result.groups`. That data never
+influenced which firms got gated. The docstring's claim that it resumes
+"without re-drafting (re-gating) anything already decided" described the
+summary, not the loop.
+
+**Root cause, from the data rather than inferred.** `signal_pipeline.run()`
+calls `dbc.enqueue()` exactly once (line 627) and **never** calls
+`set_queue_status`. Nothing marks a queue row done during a normal run, so
+after a crash every enqueued row is still `'pending'` -- including every firm
+the first attempt already gated. `next_pending()` handed them all back.
+
+Run 32, verified in Postgres:
+
+```
+wd_queue run 32: 12 rows, pending=0, done=12   (the resume marked them done)
+wd_firms  run 32:
+  id=86  jpmorgan chase       disqualified  cached_wd   <- verdict-cache hit, never enqueued
+  id=87  colliers             disqualified  gated       <- attempt 1
+  id=88  abc imaging          disqualified  gated
+  id=89  executive alliance   disqualified  gated
+  id=90  eisneramper          NULL          None        <- in flight when it died
+  id=122 colliers             disqualified  gated       <- resume, duplicate
+  id=123 abc imaging          disqualified  gated       <- duplicate
+  id=124 executive alliance   disqualified  gated       <- duplicate
+  id=125 eisneramper          disqualified  gated       <- duplicate of the NULL row
+  id=126..133 (8 firms)       gated                     <- legitimately new
+```
+
+12 gated on resume: 3 pure waste, 1 that needed gating but should have updated
+row 90 in place, 8 genuine. So the wasted spend is **18 searches, not 24** --
+eisneramper's 6 were owed, what was wrong there was the duplicate row.
+
+Replayed the pre-resume state through the new logic, read-only:
+
+```
+OLD: gated 12 -> 72 Tavily searches
+NEW: skips 3, gates 9 -> 54 searches, saved 18
+     in-place re-gate: eisneramper -> reuses row id 90
+     new rows created: 8
+     duplicate (run_id, firm_key) pairs created: 0
+```
+
+Checked whether other runs are exposed: seven finished runs still carry 100%
+pending queue rows (10:21, 13:12, 15:4, 23:3, 24:2, 25:1, 27:9). None is
+reachable, because `latest_resumable_run()` only selects `crashed`/`cancelled`
+and every one of those currently has zero pending rows. Not a latent bomb, but
+it is why the queue's status could not be trusted as the skip signal.
+
+### Report 2: update the NULL row in place, do not replace it
+
+**In place.** Two reasons, the second one measured:
+
+1. The row already holds the run's own `posting_count`, `category` and
+   `subcategory`.
+2. The `wd_postings` rows are linked to it by `firm_id` --
+   `insert_postings(run_id, firm["id"], ...)` runs inside `gate_group`. A
+   replacement row does not inherit them.
+
+The live data shows exactly what replacement costs. Every row the run-32
+resume created has `posting_count=0` and **zero** linked postings:
+
+```
+id=90  eisneramper  NULL          posting_count=1  linked_postings=1
+id=125 eisneramper  disqualified  posting_count=0  linked_postings=0
+id=126..133                       posting_count=0  linked_postings=0
+```
+
+Because `run_resume` reconstructs `FirmGroup(firm_name=..., firm_key=...)` from
+`wd_queue`, which stores only those two fields, so the group carries no
+postings: `posting_count` computes to 0 and `insert_postings` inserts nothing.
+
+**A separate, larger defect this exposes, reported not fixed.** A firm gated for
+the FIRST time on a resume can never be drafted. `_draft_one_firm` reads
+`dbc.postings_for_firm(firm_id)`, gets nothing, so `posting_title` and
+`posting_url` are empty and `find_required_fact_violations` raises
+`missing_role_title_in_opening`. Run 32 got away with it only because nothing
+qualified (one park, eleven disqualified). Fixing it means either persisting
+postings before the gate or carrying them in `wd_queue`, which is a bigger
+change than this one and was not in scope.
+
+### The fix
+
+`run_resume` now builds two things from `firms_for_run(run_id)`, which it was
+already calling:
+
+- `decided_keys`: firm_keys with a non-NULL `icp_status`. Their queue rows are
+  marked `done` and dropped from the pending list, with a progress line saying
+  how many.
+- `needs_regate`: firm_key to row, for NULL-status rows. Passed to `gate_group`
+  as `existing_firm` so the verdict lands on the original row.
+
+Reconciliation happens **before** the cap is applied, so a run whose first
+attempt already gated `cap` firms does not spend its whole resumed budget
+re-deciding them. Tested.
+
+`gate_group` gained one optional parameter, `existing_firm=None`. When given, it
+skips `create_wd_firm` and `insert_postings` and gates into that row. Default
+`None` is byte-for-byte today's behaviour, and a test asserts the default still
+creates a row and still calls `insert_postings`.
+
+Skipped firms still count toward the run summary: they were already being
+appended to the result buckets by the same loop that now classifies them.
+
+### The historical duplicates are still in the database
+
+Rows 122, 123, 124 and 125 remain. Left alone deliberately: deleting production
+rows was not asked for. They are harmless to the fix (a future `/resume` of run
+32 now sees both copies as decided and skips both) and harmless to the verdict
+cache (identical verdicts). If you want them gone, 122-124 are pure duplicates
+of 87-89, and 125 is the duplicate of 90 whose verdict would need copying back
+onto 90 first.
+
+836 tests pass, up from 824. Twelve new in `tests/test_resume_skips_gated.py`,
+against a fake wd_dbc (no live Postgres, matching `tests/test_wd_dbc.py`'s
+stated approach) with `gate_group` replaced by a counter so "did this cost a
+gate" is directly observable. One of them initially failed on a harness
+artifact rather than a real bug: the fake's `firms_for_run` returns detached
+copies, as a real SELECT does, so the fake `gate_group` had to write back by id
+the way `update_wd_firm` does. No vendored `.py` file touched. No scan command
+run.
+
