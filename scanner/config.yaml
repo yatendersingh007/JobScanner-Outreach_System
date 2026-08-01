@@ -278,6 +278,19 @@ poc_enrichment:
     - Search Advisors
     # Named recruiters seen in run 25/27 output but not yet blocked.
     - Bachrach Group              # "TBG | The Bachrach Group". NOT bare "Bachrach" — surname
+    # -- Added from the run-32 funnel audit --
+    # These reached the gate and were each disqualified on firm type or AUM
+    # after spending Tavily searches.
+    - Aston Carter                # staffing arm of Aerotek/Allegis
+    - PrideStaff                  # staffing franchise
+    - W3Global                    # IT/eng staffing
+    - Executive Alliance          # executive search
+    - EisnerAmper                 # accounting and advisory firm
+    - Colliers                    # global CRE brokerage, not an owner/operator
+    - Corient                     # RIA/wealth manager, AUM far above $2B ceiling
+    - ABC Imaging                 # print/imaging services, not RE
+    - Blue Origin                 # aerospace, unrelated sector
+    - Nichols Contracting         # general contractor, not an owner/operator
     - Insight Global
     - Randstad
     - Kforce

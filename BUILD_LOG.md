@@ -3525,3 +3525,28 @@ lookup entirely and re-gates, a reused and a re-gated row carry distinct
 the lock is released on both paths, and the full `/scan` argument matrix. No
 vendored `.py` file touched. No scan command run.
 
+
+## ICP gate adversarial eval: closed - 2026-08-01
+
+Part 1 (offline, zero cost): 3 verdict conflicts in 26 gated firms, all in the
+safe direction (qualified->parked). Root causes: single-firm path bypassed the
+verdict cache (fixed, commit 059d1c4) and engine drift between Jul 30 and 31.
+
+Part 2 (live, ~24 Tavily searches): Profile Products gated 4x fresh -- verdict,
+aum_tag, and park_reason byte-identical every time. The gate is deterministic.
+Choice NY re-gated fresh: parked on aum_unverified again, and notably
+aum_display/aum_estimated now come back EMPTY where the Jul 30 engine extracted
+"$250 million (assets valued)". The proxy tightening is real current behavior,
+and the extraction no longer surfaces the portfolio-value figure at all.
+
+Dispositions:
+- Verdict instability: EXPLAINED (cache bypass + engine drift), not gate
+  non-determinism. Cache fix shipped; conflict warnings now in run summaries.
+- Choice NY / Beyond International: possible false parks under current engine.
+  Recoverable via /qualify if policy says proxies should count.
+- Proxy-figure extraction regression: vendored icp_gate.py behavior -- donor
+  filing if Harp wants portfolio-value proxies accepted.
+
+Open policy question for Harp, not code: should an estimated/portfolio-value
+AUM figure qualify a firm, or is parking for operator review the intended
+behavior? Current engine parks. Jul 30 engine qualified.
