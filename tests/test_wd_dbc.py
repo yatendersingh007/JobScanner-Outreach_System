@@ -408,3 +408,285 @@ def test_record_contacted_inserts_with_on_conflict_upsert(monkeypatch):
 @contextmanager
 def _fake_cursor_wrap(cur):
     yield cur
+
+
+# ---------------------------------------------------------------------------
+# wd_postings.description (migration wd_004).
+#
+# The column existed nowhere before this: NormalizedJob carried a description
+# and the JSearch adapter filled it, but _posting_row() never copied it and
+# insert_postings() never listed it, so the v2 signal email's Block 2
+# traceability check and its {systems_if_known} clause could never activate --
+# block2_generic fired on every draft, for every source.
+#
+# No live Postgres in this environment (see the module docstring above), so
+# insert is exercised against a fake connection that captures the SQL and the
+# value rows, and the read path against a fake cursor. The real round trip was
+# verified separately against the live database; these tests exist to catch a
+# future edit that drops the column from either list again.
+# ---------------------------------------------------------------------------
+_JSEARCH_DESCRIPTION = (
+    "The Property Accountant will own month-end close for a 40-property portfolio, "
+    "prepare bank reconciliations in Yardi, and produce owner reporting packages "
+    "each month."
+)
+
+
+class _FakeInsertCursor:
+    def __init__(self, captured):
+        self.captured = captured
+
+    def executemany(self, sql, values):
+        self.captured["sql"] = sql
+        self.captured["values"] = values
+
+    def execute(self, sql, params=None):
+        self.captured.setdefault("execute", []).append((sql, params))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FakeInsertConn:
+    def __init__(self, captured):
+        self.captured = captured
+
+    def cursor(self):
+        return _FakeInsertCursor(self.captured)
+
+    def commit(self):
+        self.captured["committed"] = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+@pytest.fixture
+def captured_insert(monkeypatch):
+    captured = {}
+
+    @contextmanager
+    def fake_conn():
+        yield _FakeInsertConn(captured)
+
+    monkeypatch.setattr(wd_dbc, "conn", fake_conn)
+    return captured
+
+
+def _posting_dict(**over):
+    row = {
+        "company": "Acme Capital", "title": "Property Accountant",
+        "url": "https://x.example/1", "source": "aggregator:jsearch",
+        "dedup_key": "aggregator:jsearch:abc", "category": "Real Estate",
+        "subcategory": "Property Accounting", "region": "US", "location": "Austin, TX",
+        "posted_date": None, "first_seen": None, "days_since_posted": 0,
+        "match_reason": "test", "poc_name_hint": None, "poc_designation_hint": None,
+        "description": _JSEARCH_DESCRIPTION,
+    }
+    row.update(over)
+    return row
+
+
+def test_insert_postings_lists_description_in_its_columns(captured_insert):
+    wd_dbc.insert_postings(7, 3, [_posting_dict()])
+
+    sql = captured_insert["sql"]
+    assert "description" in sql
+    # one placeholder per column, stated directly rather than inferred from a
+    # comma count that happens to work out
+    columns = sql[sql.index("(") + 1:sql.index(")")].split(", ")
+    assert sql.count("%s") == len(columns)
+
+
+def test_insert_postings_sends_the_description_value(captured_insert):
+    wd_dbc.insert_postings(7, 3, [_posting_dict()])
+
+    values = captured_insert["values"][0]
+    assert _JSEARCH_DESCRIPTION in values
+
+
+def test_insert_postings_column_order_matches_the_value_order(captured_insert):
+    """A column list and a value list built separately can drift. This pins
+    them together: description must be the LAST of both."""
+    wd_dbc.insert_postings(7, 3, [_posting_dict()])
+
+    sql = captured_insert["sql"]
+    columns = sql[sql.index("(") + 1:sql.index(")")].split(", ")
+    values = captured_insert["values"][0]
+
+    assert len(columns) == len(values)
+    assert columns[-1] == "description"
+    assert values[-1] == _JSEARCH_DESCRIPTION
+    assert columns[0] == "run_id" and values[0] == 7
+    assert columns[1] == "firm_id" and values[1] == 3
+
+
+def test_insert_postings_sends_none_when_a_posting_has_no_description(captured_insert):
+    """TinyFish postings genuinely have none. They must arrive as NULL rather
+    than an empty string that reads as "we looked and it was blank"."""
+    row = _posting_dict()
+    del row["description"]
+    wd_dbc.insert_postings(7, 3, [row])
+
+    assert captured_insert["values"][0][-1] is None
+
+
+def test_postings_for_firm_returns_the_description(monkeypatch):
+    """The read path is SELECT *, so the column flows through once it exists.
+    Pinned so a future edit to an explicit column list cannot silently drop
+    it."""
+    stored = [{"id": 1, "firm_id": 3, "title": "Property Accountant",
+              "source": "aggregator:jsearch", "description": _JSEARCH_DESCRIPTION}]
+
+    class _Cur:
+        def execute(self, sql, params=None):
+            assert "SELECT *" in sql or "description" in sql
+            self.rows = stored
+
+        def fetchall(self):
+            return self.rows
+
+    @contextmanager
+    def fake_cursor():
+        yield _Cur()
+
+    monkeypatch.setattr(wd_dbc, "cursor", fake_cursor)
+
+    rows = wd_dbc.postings_for_firm(3)
+
+    assert rows[0]["description"] == _JSEARCH_DESCRIPTION
+
+
+def test_posting_row_copies_the_description_off_the_normalized_job():
+    from src.signal_pipeline import _posting_row
+
+    class Job:
+        company = "Acme Capital"
+        title = "Property Accountant"
+        url = "https://x.example/1"
+        source = "aggregator:jsearch"
+        category = "Real Estate"
+        subcategory = "Property Accounting"
+        region = "US"
+        location = "Austin, TX"
+        posted_date = None
+        first_seen = None
+        days_since_posted = 0
+        match_reason = "test"
+        poc_name = None
+        poc_designation = None
+        description = _JSEARCH_DESCRIPTION
+
+        def dedup_key(self):
+            return "aggregator:jsearch:abc"
+
+    row = _posting_row(Job())
+
+    assert row["description"] == _JSEARCH_DESCRIPTION
+
+
+def test_posting_row_tolerates_a_job_object_without_a_description():
+    """getattr with a default, so a NormalizedJob-shaped test double that
+    predates the field does not raise."""
+    from src.signal_pipeline import _posting_row
+
+    class Job:
+        company = "Acme"
+        title = "Controller"
+        url = "u"
+        source = "tinyfish:LinkedIn US - Controller"
+        category = "Real Estate"
+        subcategory = "Property Accounting"
+        region = "US"
+        location = ""
+        posted_date = None
+        first_seen = None
+        days_since_posted = 0
+        match_reason = ""
+        poc_name = None
+        poc_designation = None
+
+        def dedup_key(self):
+            return "k"
+
+    assert _posting_row(Job())["description"] == ""
+
+
+def test_a_jsearch_posting_reaches_draft_email_with_its_description_intact(monkeypatch):
+    """End to end through the drafting entry point: a posting row carrying a
+    JSearch description must reach draft_email, which means Block 2 is NOT
+    generic and the systems clause names the system the posting mentioned."""
+    from src import signal_drafting as sd
+
+    seen = {}
+    real_draft_email = sd.draft_email
+
+    def spy_draft_email(**kwargs):
+        seen["posting_description"] = kwargs.get("posting_description")
+        return real_draft_email(**kwargs)
+
+    monkeypatch.setattr(sd.dbc, "postings_for_firm", lambda fid: [{
+        "title": "Property Accountant", "url": "https://x.example/1",
+        "source": "aggregator:jsearch", "poc_name_hint": "Jane Doe",
+        "poc_designation_hint": "Controller", "description": _JSEARCH_DESCRIPTION,
+    }])
+    monkeypatch.setattr(sd.apollo_enrich, "find_email",
+                        lambda **kw: ("jane@acme.example", "verified"))
+    monkeypatch.setattr(sd.wd_poc, "find_senior_poc",
+                        lambda *a, **kw: pytest.fail("should not be reached"))
+    monkeypatch.setattr(sd.dbc, "find_prior_contact", lambda **kw: None)
+    monkeypatch.setattr(sd, "_generate_deck", lambda *a, **kw: None)
+    monkeypatch.setattr(sd, "draft_email", spy_draft_email)
+    monkeypatch.setattr(sd.dbc, "create_wd_draft", lambda fid, **f: {"id": 1, **f})
+    monkeypatch.setattr(sd.dbc, "record_contacted", lambda **kw: None)
+    monkeypatch.setattr(sd.gmail_client, "create_draft",
+                        lambda to, subject, body, attach_path=None, progress=None:
+                        {"draft_id": "D1", "attached": False})
+
+    bucket, row = sd._draft_one_firm(
+        {"id": 1, "firm_name": "Acme Capital", "research": {},
+         "category": "Real Estate", "subcategory": "Property Accounting"},
+        set(), lambda m: None)
+
+    assert bucket == "drafted"
+    assert seen["posting_description"] == _JSEARCH_DESCRIPTION
+    # the two things the description unlocks
+    assert ", across Yardi." in row["body"]
+    assert "lender and owner reporting, across Yardi." in row["body"]
+
+
+def test_a_tinyfish_posting_still_falls_back_to_the_generic_block(monkeypatch):
+    """The other half of the same wiring: no description means no systems
+    clause and no dangling "across"."""
+    from src import signal_drafting as sd
+
+    monkeypatch.setattr(sd.dbc, "postings_for_firm", lambda fid: [{
+        "title": "Property Accountant", "url": "https://x.example/1",
+        "source": "tinyfish:LinkedIn US - Property Accountant",
+        "poc_name_hint": "Jane Doe", "poc_designation_hint": "Controller",
+        "description": None,
+    }])
+    monkeypatch.setattr(sd.apollo_enrich, "find_email",
+                        lambda **kw: ("jane@acme.example", "verified"))
+    monkeypatch.setattr(sd.dbc, "find_prior_contact", lambda **kw: None)
+    monkeypatch.setattr(sd, "_generate_deck", lambda *a, **kw: None)
+    monkeypatch.setattr(sd.dbc, "create_wd_draft", lambda fid, **f: {"id": 1, **f})
+    monkeypatch.setattr(sd.dbc, "record_contacted", lambda **kw: None)
+    monkeypatch.setattr(sd.gmail_client, "create_draft",
+                        lambda to, subject, body, attach_path=None, progress=None:
+                        {"draft_id": "D1", "attached": False})
+
+    _bucket, row = sd._draft_one_firm(
+        {"id": 1, "firm_name": "Acme Capital", "research": {},
+         "category": "Real Estate", "subcategory": "Property Accounting"},
+        set(), lambda m: None)
+
+    assert "across" not in row["body"]
+    assert "lender and owner reporting." in row["body"]
+

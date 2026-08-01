@@ -3041,3 +3041,117 @@ in `tests/test_signal_drafting.py`). Seventeen v1-template tests were remapped
 to the v2 paragraphs rather than deleted. No vendored `.py` file touched. No
 scan command run.
 
+
+## Persist the posting description, activating the v2 template's two specific elements - 2026-08-15
+
+`wd_postings` had no `description` column, so the v2 signal email's Block 2
+traceability check and its `{systems_if_known}` clause could never fire:
+`block2_generic` on every draft, from every source.
+
+- `migrations/wd_004_postings_description.sql`:
+  `ALTER TABLE wd_postings ADD COLUMN IF NOT EXISTS description TEXT`
+- `wd_dbc.insert_postings()`: `description` appended to `cols`
+- `signal_pipeline._posting_row()`: `"description": getattr(p, "description", "") or ""`
+
+`getattr` with a default rather than `p.description`, so a NormalizedJob-shaped
+test double that predates the field does not raise.
+
+`postings_for_firm()` needed no change: it is `SELECT *`, so the column flows
+through as soon as it exists. Confirmed against the live table, and pinned by a
+test so a future edit to an explicit column list cannot silently drop it.
+`_draft_one_firm` already read a `description` key off the row and threaded it
+to `draft_email`, so nothing in the drafting layer changed.
+
+### Report: how migrations/ is applied
+
+**Manually. Nothing applies it automatically.** `wd_dbc.apply_migrations()` is
+a one-line wrapper over `lib_snapshot.db.migrate()`, and a grep of `src/` finds
+no call site anywhere: not `cli.py`, not `bot.py`, not `run_scan.py`. It runs
+only when the operator invokes the command CLAUDE.md already documents:
+
+```
+python -c "from src import wd_dbc; wd_dbc.apply_migrations()"
+```
+
+`migrate()` globs `MIGRATIONS_DIR/*.sql` in sorted order, skips anything whose
+filename is already in `schema_migrations`, executes each remaining file in its
+own transaction, and records it. `MIGRATIONS_DIR` resolves to
+`C:\Users\DELL\Job-ScannerOutreach\migrations` (`lib_snapshot/config.py`'s ROOT
+is this repo, since lib_snapshot is vendored here), so it only ever sees
+Workflow D's own files.
+
+Applied it, then re-ran it: `applied migration
+wd_004_postings_description.sql` / `applied 1 migration(s)`, then `no
+un-applied migrations`. Idempotent, and `ADD COLUMN IF NOT EXISTS` makes the
+SQL itself safe even if `schema_migrations` were ever cleared.
+
+### Report: the shared database is unaffected beyond the new column
+
+`schema_migrations` IS shared. It currently holds Workflow C's `001_...`
+through `007_...` alongside Workflow D's `wd_001`..`wd_004`. That is exactly
+why every Workflow D migration carries the `wd_` prefix: the table's primary
+key is the bare filename, so a plain `004_...` here would collide with C's
+`004_wc_firms_aum_tag.sql`.
+
+Diffed the ENTIRE public schema before and after, all 19 tables, every column
+with its type and nullability:
+
+```
+tables added/removed: set() set()
+  wd_postings: added ['description:text:YES']  removed []
+```
+
+One column, on one table, nullable. Nothing else changed. `wd_postings` is
+Workflow D's own table; Workflow A reads `leads`/`companies`/`connections` and
+Workflow C reads `wc_*`, and neither touches it. All 99 pre-existing rows keep
+NULL: the column is nullable with no default, so postings from sources that
+genuinely have no description (the TinyFish LinkedIn guest search) stay NULL
+rather than getting an empty string that would read as "we looked and it was
+blank".
+
+TEXT with no length cap: the JSearch adapter already truncates to 2000 chars,
+and a DB-side limit would silently corrupt a longer description from a future
+source instead of storing what it was handed.
+
+### Verified end to end against the live database
+
+Created a throwaway run and firm, inserted a JSearch-shaped posting carrying a
+165-character description, read it back, and put it through `draft_email`:
+
+```
+_posting_row includes description: True | len 165
+postings_for_firm rows: 1
+  description present   : True
+  round-tripped intact  : True
+  systems clause in body: True     <- ", across Yardi." present
+```
+
+That is the first time the `{systems_if_known}` clause has ever populated.
+Block 2 still reported `block2_generic` on that particular run, correctly: the
+live LLM returned "manages 1,024 multifamily units", the pre-existing grounding
+guard caught `ungrounded_claim:1024` and fell back. The description path is
+working; that firm's generated text just failed grounding on its own merits.
+
+Cleaned up afterwards and confirmed it: `wd_postings` back to 99 rows, zero
+rows matching the test firm name. (`wd_firms` and `wd_drafts` are higher than
+this BUILD_LOG's earlier funnel-audit baselines because of operator runs since,
+not test residue.)
+
+### Tests
+
+824 pass, up from 815. Nine new in `tests/test_wd_dbc.py`, against fakes rather
+than live Postgres, matching that file's existing approach and its stated
+caveat: `description` is in the INSERT column list, its value is sent, the
+column and value orders stay in step (both last), a posting without one sends
+NULL, `postings_for_firm` returns it, `_posting_row` copies it and tolerates a
+job object without the attribute, a JSearch posting reaches `draft_email` with
+the description intact and produces ", across Yardi.", and a TinyFish posting
+still yields no systems clause and no dangling "across".
+
+One of these initially passed for the wrong reason: the placeholder-count
+assertion compared `sql.count("%s")` against `sql.count(",") // 2 + 1`, an
+identity that happens to hold at 18 columns. Replaced with a direct
+count-the-columns assertion.
+
+No vendored `.py` file touched. No scan command run.
+

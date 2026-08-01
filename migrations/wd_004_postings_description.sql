@@ -1,0 +1,28 @@
+-- Workflow D — persist the posting description so the v2 signal email's two
+-- most specific elements can actually activate.
+--
+-- NormalizedJob already carries a description and the JSearch adapter fills it
+-- (scanner/connectors/adapters/jsearch.py: first 2000 chars of
+-- job_description), but it was dropped on the way into Postgres:
+-- signal_pipeline._posting_row() never copied it and wd_dbc.insert_postings()
+-- never listed it, so wd_postings had nowhere to put it. Consequence in the
+-- drafting layer: Block 2 fell back to block2_generic on EVERY draft and the
+-- {systems_if_known} clause was never populated, from any source.
+--
+-- Additive and idempotent, per referral-system's migrations/ pattern. TEXT
+-- with no length constraint: the adapter already truncates to 2000 chars, and
+-- a DB-side limit would silently corrupt a longer description from a future
+-- source rather than store what it was given. Nullable with no default --
+-- every existing row keeps NULL, and postings from sources that genuinely
+-- have no description (the TinyFish LinkedIn guest search) stay NULL rather
+-- than being given an empty string that reads as "we looked and it was blank".
+--
+-- Scope: wd_postings is Workflow D's own table. Workflows A and C read
+-- leads/companies/connections and wc_* respectively and never touch this one,
+-- so nothing outside Workflow D changes. schema_migrations is shared across
+-- the three workflows in the same `outreach` database, which is why every
+-- Workflow D migration filename carries the wd_ prefix: C's own migrations are
+-- numbered 001_..007_ and a bare 004_ here would collide on that table's
+-- primary key.
+
+ALTER TABLE wd_postings ADD COLUMN IF NOT EXISTS description TEXT;

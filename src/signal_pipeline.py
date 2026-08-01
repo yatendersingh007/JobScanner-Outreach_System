@@ -501,6 +501,13 @@ def _posting_row(p) -> dict:
         "match_reason": p.match_reason,
         "poc_name_hint": p.poc_name,
         "poc_designation_hint": p.poc_designation,
+        # The v2 signal email's Block 2 traceability check and its
+        # {systems_if_known} clause both read this. NormalizedJob has carried
+        # it all along (JSearch fills it, the TinyFish guest search cannot);
+        # it was simply never copied into the row, so every draft fell back to
+        # block2_generic. getattr keeps a NormalizedJob-shaped test double
+        # without the field working.
+        "description": getattr(p, "description", "") or "",
     }
 
 
