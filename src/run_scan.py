@@ -217,7 +217,7 @@ def run_scan(mode: str, days: Optional[int] = None, dry: bool = False,
 
 
 def run_single_firm(mode: str, firm_name: str, dry: bool = False,
-                     progress=tg.progress):
+                     fresh: bool = False, progress=tg.progress):
     """`/scan "Firm"` / `--firm "Firm"`: gate exactly one named firm, skipping
     the scanner entirely. Reuses signal_pipeline.gate_group() and its dbc
     helpers unchanged -- this is new orchestration on top of them, not a
@@ -227,7 +227,26 @@ def run_single_firm(mode: str, firm_name: str, dry: bool = False,
     Takes the same Postgres advisory run lock signal_pipeline.run() does,
     before creating the wd_runs row -- this is a second front door into the
     same gate machinery and must be covered by the same single mechanism,
-    not a second one."""
+    not a second one.
+
+    VERDICT CACHE (run-35 fix). This path used to go straight to gate_group(),
+    so every `/scan "Firm"` re-researched from scratch: 6 Tavily searches and a
+    fresh chance at a different answer. Live evidence, Choice NY:
+
+        id 65  run 25  batch        gated      qualified  $250M
+        id 66  run 27  batch        cached_wd  qualified  $250M   (from 65)
+        id 83  run 29  SINGLE-FIRM  gated      parked     no figure
+
+    Run 29 was a single-firm run on the same day as 25/27. The cache would have
+    hit on 65 and returned qualified; instead it re-gated and parked, leaving
+    two contradictory verdicts for one firm. Now it takes the same cache pass
+    the batch path takes, before spending anything.
+
+    `fresh=True` deliberately skips the cache, for when the operator WANTS a
+    re-gate -- research improved, the firm changed, or the cached verdict is
+    suspect. That is the only way to get a re-gate inside the window, so it has
+    to exist: without it, wiring the cache in would make a bad cached verdict
+    unfixable until it expired."""
     dbc = signal_pipeline.dbc
     if not dbc.acquire_run_lock():
         raise dbc.RunAlreadyInProgress(
@@ -239,14 +258,37 @@ def run_single_firm(mode: str, firm_name: str, dry: bool = False,
         result = signal_pipeline.RunResult(run_id=run_row["id"], mode=mode,
                                            recency_days_used=1, dry=dry, groups=1)
         group = signal_pipeline.FirmGroup(firm_name=firm_name, firm_key=dbc.firm_key(firm_name))
-        progress(f"Gating {firm_name} (single-firm override, scanner skipped)...")
-        firm = signal_pipeline.gate_group(result.run_id, group, progress)
-        result.tavily_searches += firm.pop("_search_calls", 0) or 0
-        result.llm_tokens += firm.pop("_tokens_used", 0) or 0
-        result.research_cost_usd += float(firm.pop("_research_cost_usd", 0) or 0)
-        {"qualified": result.qualified,
-         "disqualified": result.disqualified,
-         "parked": result.parked}.get(firm["icp_status"], result.parked).append(firm)
+
+        # The same cache pass the batch path runs (signal_pipeline.run: window =
+        # config.REGATE_WINDOW_DAYS, then verdict_cache_lookup per group before
+        # anything is spent), and the same _reuse_cached() writer, so a reused
+        # verdict lands identically from either front door: verdict_source
+        # 'cached_wd'/'cached_wc' and verdict_cached_from pointing at the row it
+        # came from. Parks are never cached (verdict_cache_lookup's own rule), so
+        # a parked firm always re-gates here whether or not `fresh` is set.
+        cached = None
+        if not fresh:
+            cached = dbc.verdict_cache_lookup(firm_name, config.REGATE_WINDOW_DAYS)
+
+        if cached:
+            progress(f"{firm_name}: reusing the {cached['icp_status']} verdict decided "
+                     f"{cached['decided_at']} (row {cached['id']}, {cached['src']}). "
+                     f'No searches spent. /scan "{firm_name}" fresh to re-gate.')
+            firm = signal_pipeline._reuse_cached(result.run_id, group, cached)
+            result.skipped_known.append(firm)
+            {"qualified": result.qualified,
+             "disqualified": result.disqualified}.get(
+                firm["icp_status"], result.parked).append(firm)
+        else:
+            note = " (fresh, cache skipped)" if fresh else ""
+            progress(f"Gating {firm_name} (single-firm override, scanner skipped){note}...")
+            firm = signal_pipeline.gate_group(result.run_id, group, progress)
+            result.tavily_searches += firm.pop("_search_calls", 0) or 0
+            result.llm_tokens += firm.pop("_tokens_used", 0) or 0
+            result.research_cost_usd += float(firm.pop("_research_cost_usd", 0) or 0)
+            {"qualified": result.qualified,
+             "disqualified": result.disqualified,
+             "parked": result.parked}.get(firm["icp_status"], result.parked).append(firm)
         signal_pipeline._apply_draft_cap_fields(result)
         dbc.update_wd_run(
             result.run_id,

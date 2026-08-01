@@ -53,7 +53,8 @@ _QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "‘": "’"}
 # Reserved /scan sub-words. A quoted "firm name" that is actually one of
 # these is almost always a mis-typed option, not a real company -- refuse
 # rather than silently research it or silently misparse the command.
-_COMMAND_FRAGMENT_WORDS = {"dry", "stop", "days", "cancel", "confirm", "yes", "ok", "resume"}
+_COMMAND_FRAGMENT_WORDS = {"dry", "stop", "days", "cancel", "confirm", "yes", "ok",
+                           "resume", "fresh"}
 
 
 def strip_quotes(s: str) -> str:
@@ -121,14 +122,19 @@ def _looks_like_command_fragment(name: str) -> bool:
 # /scan argument parsing
 # ---------------------------------------------------------------------------
 def parse_scan_args(arg: str) -> dict:
-    """Parses the text after '/scan'. Returns {"firm", "dry", "days", "stop"}.
-    Raises ValueError (the caller sends the message) on anything unrecognized
-    -- reject rather than guess at what an operator meant."""
+    """Parses the text after '/scan'. Returns {"firm", "dry", "days", "stop",
+    "fresh"}. Raises ValueError (the caller sends the message) on anything
+    unrecognized -- reject rather than guess at what an operator meant.
+
+    `fresh` is only meaningful with a firm name: it skips the verdict cache so
+    the firm is re-gated (run-35). On a batch run there is nothing to skip --
+    the batch path's cache pass is what makes a full run affordable -- so
+    `/scan fresh` is rejected rather than silently ignored."""
     text = (arg or "").strip()
     if not text:
-        return {"firm": None, "dry": False, "days": None, "stop": False}
+        return {"firm": None, "dry": False, "days": None, "stop": False, "fresh": False}
     if text.lower() == "stop":
-        return {"firm": None, "dry": False, "days": None, "stop": True}
+        return {"firm": None, "dry": False, "days": None, "stop": True, "fresh": False}
 
     if text[0] in _QUOTE_PAIRS:
         firm, rest = parse_quoted(text)
@@ -138,10 +144,21 @@ def parse_scan_args(arg: str) -> dict:
                 'Nothing started. Use /scan, /scan dry, /scan days N, or /scan "Firm Name".'
             )
         rest = rest.strip()
-        dry = rest.lower() == "dry"
-        if rest and not dry:
-            raise ValueError(f'Unrecognized text after the firm name: "{rest}".')
-        return {"firm": firm, "dry": dry, "days": None, "stop": False}
+        words = rest.split()
+        dry = fresh = False
+        leftover = []
+        for w in words:
+            if w.lower() == "dry":
+                dry = True
+            elif w.lower() == "fresh":
+                fresh = True
+            else:
+                leftover.append(w)
+        if leftover:
+            raise ValueError(
+                f'Unrecognized text after the firm name: "{" ".join(leftover)}". '
+                'Use /scan "Firm", /scan "Firm" dry, or /scan "Firm" fresh.')
+        return {"firm": firm, "dry": dry, "days": None, "stop": False, "fresh": fresh}
 
     words = text.split()
     dry = False
@@ -161,11 +178,16 @@ def parse_scan_args(arg: str) -> dict:
             i += 1
     if leftover:
         candidate = " ".join(leftover)
+        if candidate.lower() == "fresh":
+            raise ValueError(
+                'fresh only applies to a single firm: /scan "Firm" fresh. A batch run '
+                "relies on the verdict cache to be affordable, so there is nothing to "
+                "skip. Nothing started.")
         raise ValueError(
             f'Unrecognized /scan argument: "{candidate}". A firm name needs quotes: '
             f'/scan "{candidate}". Otherwise use /scan, /scan dry, or /scan days N.'
         )
-    return {"firm": None, "dry": dry, "days": days, "stop": False}
+    return {"firm": None, "dry": dry, "days": days, "stop": False, "fresh": False}
 
 
 # ---------------------------------------------------------------------------
@@ -196,9 +218,11 @@ def _run_scan_job(parsed: dict) -> None:
         dry = parsed.get("dry", False)
         try:
             if firm:
-                tg.send(f'Single-firm run started: "{firm}" (scanner skipped).')
+                fresh = parsed.get("fresh", False)
+                note = ", cache skipped" if fresh else ""
+                tg.send(f'Single-firm run started: "{firm}" (scanner skipped{note}).')
                 result = run_single_firm(mode="manual", firm_name=firm, dry=dry,
-                                         progress=tg.progress)
+                                         fresh=fresh, progress=tg.progress)
             else:
                 tg.send("Workflow D run started.")
                 result = run_scan(mode="manual", days=parsed.get("days"), dry=dry,
@@ -471,6 +495,7 @@ def _help_text() -> str:
         "The opt-out, not the default.\n"
         f"/scan days N           - catch-up window after a gap (1-{config.MAX_SCAN_DAYS}).\n"
         '/scan "Firm"           - single-firm override, skips the scanner entirely.\n'
+        '/scan "Firm" fresh     - same, but re-gate instead of reusing a cached verdict\n'
         "/status                - last run's buckets, spend, queue depth.\n"
         '/qualify "Firm" <AUM>  - rescue a parked firm, e.g. /qualify "Acme" 800M\n'
         '/disqualify "Firm"     - reject a parked firm\n'

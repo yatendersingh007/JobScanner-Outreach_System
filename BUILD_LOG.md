@@ -3418,3 +3418,110 @@ against a copy of the real config, audit trail) and 11 in
 and the tests still exercise its actual shape. No vendored `.py` file touched.
 No scan command run.
 
+
+## run_single_firm takes the verdict cache, plus a `fresh` escape hatch - 2026-08-18
+
+### Report: how the batch path's cache call works
+
+Four pieces, all in `signal_pipeline.run()` and `wd_dbc`:
+
+1. **Window.** `window = config.REGATE_WINDOW_DAYS` (currently **90 days**),
+   read once per run.
+2. **The pass, before any spend.** For every group, in a loop that runs before
+   `enqueue()` and before the gate cap is applied:
+   `cached = dbc.verdict_cache_lookup(g.firm_name, window)`. A hit goes to
+   `_reuse_cached()` and into `result.skipped_known` plus the qualified or
+   disqualified bucket; a miss goes into `to_gate`. The cap is then applied to
+   `to_gate` only, so reused verdicts never consume gate budget.
+3. **`verdict_cache_lookup`.** Matches on `firm_key`, so "Grubb Properties,
+   LLC" finds "Grubb Properties". Only `qualified` and `disqualified` are
+   cacheable, deliberately: a park means the research was inconclusive, and
+   re-running it later is the whole point of a park. Freshness is
+   `COALESCE(gated_at, created_at) >= now() - window`. It checks `wd_firms`
+   first (`src='cached_wd'`), newest id first, then falls back to Workflow C's
+   `wc_firms` matched on the same normalized key (`src='cached_wc'`).
+4. **`_reuse_cached`.** Writes a new `wd_firms` row for this run copying
+   `icp_status`, `icp_reason`, `aum_tag` and `research` from the cached row, and
+   records provenance: `verdict_source` = the cache's own `src`,
+   `verdict_cached_from` = the source row id, `gated_at` = the original
+   decision time. Then inserts the group's postings.
+
+`run_single_firm` used none of it. It built a `FirmGroup` and called
+`gate_group()` directly.
+
+### The fix
+
+`run_single_firm` now runs step 2 with the same window, the same
+`verdict_cache_lookup`, and the same `_reuse_cached` writer, so a reused verdict
+is byte-identical in provenance from either front door. On a miss it gates
+exactly as before.
+
+`fresh=True` skips the cache. This has to exist: with a 90-day window, wiring
+the cache in without an escape hatch would make a bad cached verdict
+unfixable for three months. Wired through both front doors:
+
+- `/scan "Firm" fresh` (also `/scan "Firm" dry fresh`)
+- `python -m src.cli scan --firm "X" --fresh`
+
+`/scan fresh` without a firm is **rejected**, not silently ignored: a batch run
+depends on the cache to be affordable, so there is nothing to skip. And `fresh`
+joined `_COMMAND_FRAGMENT_WORDS`, so `/scan "fresh"` is caught as a leftover
+option rather than gated as a firm named "fresh".
+
+### Verified against the real history
+
+```
+REGATE_WINDOW_DAYS = 90
+Choice NY Property Management LLC   HIT   row 66 qualified (cached_wd) decided 2026-07-31
+Beyond International Group          miss  (parks are never cached)
+Profile Products LLC                miss  (parks are never cached)
+```
+
+Choice NY's history and what changes:
+
+```
+id=65  run 25  qualified   gated       2026-07-31
+id=66  run 27  qualified   cached_wd   2026-07-31   (from 65)
+id=82  run 28  NULL        NULL                     (crashed mid-gate)
+id=83  run 29  parked      gated       2026-07-31   <- single-firm, bypassed the cache
+```
+
+A live `verdict_cache_lookup` today returns row 66, qualified. Run 29 would now
+reuse it at zero search cost instead of re-gating to a contradictory park.
+
+### Correcting the conflict list
+
+Two of the three conflicts cited do not exist as described, and it matters
+because it changes what this fix is claimed to prevent:
+
+- **Choice NY 65/66 vs 83: real, and exactly as described.** Run 29 was a
+  single-firm run (`postings_kept=0`, no `csv_path`), it bypassed the cache, and
+  it produced the contradictory park.
+- **"Beyond International 76 vs 103": no.** Row 76 is Klausner, disqualified.
+  There is no row 103. Beyond International Group has exactly **one** row (79,
+  run 27, parked).
+- **"Profile Products 118 vs 131": no.** There is no row 118. Profile Products
+  has exactly **one** row (131, run 32, parked).
+
+Both non-conflicts are parked, and a park can never be served from the cache or
+conflict with it, because `verdict_cache_lookup` never caches parks. So this fix
+prevents the Choice NY class of conflict and would not have touched the other
+two. Worth being precise about: the eval report's own verdict-instability list
+was australia-employment, choice-ny, havtech, jpmorgan-chase and wealthspire,
+and of those only Choice NY is same-generation research variance.
+
+Also worth noting for future spend accounting: single-firm runs are
+identifiable by `postings_kept=0` with no `csv_path`, but that heuristic
+mislabels a resumed run (run 32 has `postings_kept=0` and gated 16 firms).
+`wd_runs.mode` is `'manual'` for every run including single-firm ones, so mode
+does not distinguish them.
+
+956 tests pass, up from 937. 19 new in `tests/test_single_firm_cache.py`: cached
+firm returns the cached verdict at zero gate cost (gate never called, zero
+searches, zero tokens, zero cost), the window matches the batch path's, the
+reused row carries `cached_wd` and `verdict_cached_from`, `fresh` skips the
+lookup entirely and re-gates, a reused and a re-gated row carry distinct
+`verdict_source` values so a conflict stays diagnosable, parks always re-gate,
+the lock is released on both paths, and the full `/scan` argument matrix. No
+vendored `.py` file touched. No scan command run.
+

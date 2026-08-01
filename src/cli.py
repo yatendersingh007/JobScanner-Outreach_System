@@ -48,6 +48,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--firm", type=str, default=None, metavar="NAME",
         help='Single-firm override, skips the scanner entirely.',
     )
+    scan_p.add_argument(
+        "--fresh", action="store_true", default=False,
+        help="With --firm: skip the verdict cache and re-gate, instead of "
+             "reusing a still-fresh prior verdict. Costs Tavily searches; the "
+             "only way to get a re-gate inside REGATE_WINDOW_DAYS.",
+    )
     return parser
 
 
@@ -82,7 +88,7 @@ def main(argv: list | None = None) -> int:
     try:
         if args.firm:
             result = run_single_firm(mode="manual", firm_name=args.firm,
-                                     dry=args.dry, progress=print)
+                                     dry=args.dry, fresh=args.fresh, progress=print)
         else:
             result = run_scan(
                 mode="manual",
