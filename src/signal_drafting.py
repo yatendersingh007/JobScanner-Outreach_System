@@ -24,6 +24,7 @@ from lib_referral import apollo_enrich, config as gate_config, deck_filler, fact
 from . import signal_pipeline
 from . import wd_config as config
 from . import wd_dbc as dbc
+from . import role_families
 from . import wd_poc
 
 log = logging.getLogger("workflow-d.signal_drafting")
@@ -80,34 +81,100 @@ OFFERING = (
 )
 
 
-def _subject(posting_title: str, posting_count: int) -> str:
-    if posting_count > 1:
-        return f"Your {posting_count} open finance roles"
-    return f"Your {posting_title} opening"
+# ---------------------------------------------------------------------------
+# The v2 template (run-32). Every paragraph below is Harp's copy, reproduced
+# character-for-character. The only substitutions are the named slots, and
+# every slot except {block2} is filled from a deterministic source: the
+# posting title verbatim, the firm's display name, or src/role_families.py's
+# fixed table. No model retypes any of it.
+#
+# ONE STRUCTURAL DEPARTURE FROM v1, called out because it removes a feature:
+# v1 had a multi-posting variant ("Your {n} open finance roles" / "You have
+# {n} finance roles open at ... including ..."). The v2 copy has no such
+# branch, and the instruction was to implement it exactly, so the multi-role
+# variant is retired. A firm hiring three seats now gets an email about the
+# first distinct title. posting_count is still computed and still reaches
+# wd_drafts; nothing reads it into the body.
+# ---------------------------------------------------------------------------
+SUBJECT_TEMPLATE = "Your {role_title} hire for $55K, not $180K"
+
+_PARA_OPENING = ("Hi {first_name},\n\n"
+                 "I run X Analyst. You have a {role_title} opening at {company_name}, "
+                 "and we are the alternative to that hire.")
+
+_PARA_MATH = (
+    "A US fully loaded hire for that seat runs $145K to $180K, and the search takes "
+    "three months. {role_pain} while you run it. Most firms bridge it by pushing the "
+    "work onto a controller who is already at capacity, or by paying a provider whose "
+    "partners never open the ledger. Both cost more than the seat."
+)
+
+# The stack sentence has two forms. With no known system the sentence has to
+# STOP at the end of the stack list -- an "across" with nothing after it is
+# the kind of dangling artefact that tells a reader this was machine-built.
+_PARA_CREDENTIAL_WITH_SYSTEMS = (
+    "I built the India property and fund accounting teams for Magnolia Capital and "
+    "29th Street Capital from scratch. The same stack this seat needs: "
+    "{role_mapped_stack}, across {systems_if_known}."
+)
+_PARA_CREDENTIAL_NO_SYSTEMS = (
+    "I built the India property and fund accounting teams for Magnolia Capital and "
+    "29th Street Capital from scratch. The same stack this seat needs: "
+    "{role_mapped_stack}."
+)
+
+_PARA_OFFER = (
+    "We place a dedicated senior operator on your team for $55K to $75K. Same talent "
+    "pool the institutional shops recruit, top 0.5% CA/CPAs, paid top of market, "
+    "embedded in your systems and your {role_cadence}. Exclusively yours, live in 10 days."
+)
+
+# The attachment sentence is conditional for the same reason v1's was: a deck
+# can genuinely fail to generate (and now also fails closed when reconversion
+# cannot produce a PDF that matches the PPTX -- run-31). Asserting an
+# attachment that is not there is a false factual claim in the one paragraph
+# this module treats as trustworthy by construction.
+_ATTACHMENT_SENTENCE = "I've attached an overview of how we run this function."
+_PARA_CTA_TAIL = (
+    "Can we do a call next week? I'd bring our Head of Delivery, ex-Blackstone and "
+    "Goldman Sachs, one of the first people to move large funds' operations to India. "
+    "Thirty minutes with him is useful even if we never work together."
+)
+
+_PARA_SIGNOFF = ("Harp\nFounder, X Analyst\n\n"
+                 "P.S. The posting is here if I have the wrong one: {job_posting_url}")
 
 
-def block_1(poc_first_name: str, firm_short: str, posting_title: str, posting_count: int) -> str:
-    greeting = f"Hi {poc_first_name or 'there'},"
-    if posting_count > 1:
-        signal = (f"You have {posting_count} finance roles open at {firm_short} "
-                  f"right now, including {posting_title}. I run X Analyst. We "
-                  "are the alternative to that hire.")
-    else:
-        signal = (f"You have a {posting_title} open at {firm_short}. I run X "
-                  "Analyst. We are the alternative to that hire.")
-    return f"{greeting}\n\n{signal}"
+def _subject(role_title: str) -> str:
+    return SUBJECT_TEMPLATE.format(role_title=role_title)
 
 
-def block_6(posting_url: str, deck_attached: bool) -> str:
-    """The P.S. always carries the posting URL (the honest correction path).
-    The "deck is attached" sentence is included ONLY when a deck genuinely
-    is -- Prompt 4's scope, not yet wired. Every draft made before then
-    would otherwise assert an attachment gmail_client.create_draft() was
-    never given, a false factual claim in the one block this module treats
-    as trustworthy by construction."""
-    deck_line = "The deck is attached. " if deck_attached else ""
-    return ("Harp\nFounder, X Analyst\n\n"
-            f"P.S. {deck_line}The posting is here if I have the wrong one: {posting_url}")
+def para_opening(first_name: str, role_title: str, company_name: str) -> str:
+    return _PARA_OPENING.format(first_name=first_name or "there",
+                                role_title=role_title, company_name=company_name)
+
+
+def para_math(role_pain: str) -> str:
+    return _PARA_MATH.format(role_pain=role_pain)
+
+
+def para_credential(role_mapped_stack: str, systems_if_known: str) -> str:
+    template = (_PARA_CREDENTIAL_WITH_SYSTEMS if (systems_if_known or "").strip()
+                else _PARA_CREDENTIAL_NO_SYSTEMS)
+    return template.format(role_mapped_stack=role_mapped_stack,
+                           systems_if_known=systems_if_known)
+
+
+def para_offer(role_cadence: str) -> str:
+    return _PARA_OFFER.format(role_cadence=role_cadence)
+
+
+def para_cta(deck_attached: bool) -> str:
+    return f"{_ATTACHMENT_SENTENCE} {_PARA_CTA_TAIL}" if deck_attached else _PARA_CTA_TAIL
+
+
+def para_signoff(job_posting_url: str) -> str:
+    return _PARA_SIGNOFF.format(job_posting_url=job_posting_url)
 
 
 _LEGAL_SUFFIX_DISPLAY_RE = re.compile(
@@ -197,22 +264,34 @@ def grounding_corpus(research: dict, firm_name: str, posting_title: str, posting
 # posting record -- e.g. a reworded title -- which is exactly the defect
 # this check exists to catch mechanically rather than trust by construction.
 # ---------------------------------------------------------------------------
-_DECK_ATTACHED_CLAIM_RE = re.compile(r"the deck is attached", re.IGNORECASE)
+_DECK_ATTACHED_CLAIM_RE = re.compile(r"i've attached an overview", re.IGNORECASE)
 
 
-def find_required_fact_violations(block1_text: str, block6_text: str, block3_text: str,
+def find_required_fact_violations(opening_text: str, signoff_text: str, body_text: str,
                                   posting_title: str, firm_short_name: str, posting_url: str,
                                   corpus_text: str, deck_attached: bool,
                                   firm_oneliner: str = "") -> list[str]:
+    """v1's checks, remapped onto the v2 paragraphs. Every one survives; none
+    was dropped. See BUILD_LOG for the paragraph-by-paragraph mapping.
+
+      v1 block1 (greeting + signal)  -> opening_text
+      v1 block6 (signature + P.S.)   -> signoff_text
+      v1 block3 (the fixed money
+                 paragraph)          -> body_text, because v2 splits the two
+                                        dollar ranges across two paragraphs
+                                        ($145K-$180K in the math paragraph,
+                                        $55K-$75K in the offer paragraph), so
+                                        there is no single block to compare.
+    """
     v = []
-    if not posting_title or posting_title not in block1_text:
-        v.append("missing_posting_title_in_block1")
+    if not posting_title or posting_title not in opening_text:
+        v.append("missing_role_title_in_opening")
     if not posting_title or posting_title not in corpus_text:
         v.append("posting_title_not_grounded")
-    if not firm_short_name or firm_short_name not in block1_text:
-        v.append("missing_firm_name_in_block1")
-    if not posting_url or posting_url not in block6_text:
-        v.append("missing_posting_url_in_block6")
+    if not firm_short_name or firm_short_name not in opening_text:
+        v.append("missing_firm_name_in_opening")
+    if not posting_url or posting_url not in signoff_text:
+        v.append("missing_posting_url_in_signoff")
     # Run 27 fix: same mechanism as posting_title_not_grounded above, applied
     # to the firm one-liner Block 2 draws on. Confirmed empty is fine (thin
     # research -- _fallback_blocks already lets Block 2 go blank rather than
@@ -226,14 +305,20 @@ def find_required_fact_violations(block1_text: str, block6_text: str, block3_tex
     # grounded in a research blob, just the wrong one. See BUILD_LOG.md.
     if firm_oneliner and firm_oneliner not in corpus_text:
         v.append("firm_oneliner_not_grounded")
-    # The claim and the attachment cannot diverge: Block 6 says a deck is
-    # attached exactly when one genuinely is, in either direction.
-    if bool(_DECK_ATTACHED_CLAIM_RE.search(block6_text)) != bool(deck_attached):
+    # The claim and the attachment cannot diverge, in either direction. v1
+    # keyed this off "The deck is attached."; v2's sentence is "I've attached
+    # an overview of how we run this function." Same guarantee, new wording.
+    if bool(_DECK_ATTACHED_CLAIM_RE.search(body_text)) != bool(deck_attached):
         v.append("deck_attachment_claim_mismatch")
-    if block3_text != _BLOCK_3:
-        v.append("block3_modified")
-    elif "$145K to $180K" not in block3_text or "$55K to $75K" not in block3_text:
-        v.append("missing_dollar_ranges_in_block3")
+    # v1 compared its whole fixed money block against a constant. v2 has no
+    # single money block, so the two ranges are checked where they actually
+    # live, and their fixed sentences are checked intact.
+    if "$145K to $180K" not in body_text or "$55K to $75K" not in body_text:
+        v.append("missing_dollar_ranges")
+    if "A US fully loaded hire for that seat runs $145K to $180K" not in body_text:
+        v.append("math_sentence_modified")
+    if "for $55K to $75K" not in body_text:
+        v.append("offer_sentence_modified")
     return v
 
 
@@ -269,6 +354,33 @@ _NOT_JUST_X_ITS_Y_RE = re.compile(
     r"\b(?:not|isn'?t|is\s+not)\s+(?:just|merely|only)\b[^.?!]{0,60}?\b(?:it'?s|it\s+is|but)\b",
     re.IGNORECASE,
 )
+
+
+# v2 hard-fail phrases (run-32). Distinct from _BANNED_PHRASES above, which
+# are soft style notes that trigger a retry: these four are the tells that the
+# email reverted to generic sales writing, and they fail the compose outright.
+_V2_FORBIDDEN_PHRASES = ("my experience", "great fit", "my background", "i am writing to")
+
+
+def find_body_violations(body: str, subject: str, block2: str, role_title: str) -> list[str]:
+    """Hard-fail validators on the COMPOSED body (template item 5). These are
+    not retryable style notes; a hit here means the composed email must not
+    ship as-is."""
+    v = []
+    low = (body or "").lower()
+    stripped_block2 = (block2 or "").strip()
+    if stripped_block2 and not stripped_block2.startswith("You"):
+        v.append("block2_does_not_open_with_you")
+    if "—" in (body or "") or "–" in (body or ""):
+        v.append("em_dash_in_body")
+    for phrase in _V2_FORBIDDEN_PHRASES:
+        if phrase in low:
+            v.append(f"forbidden_phrase:{phrase}")
+    if subject != SUBJECT_TEMPLATE.format(role_title=role_title):
+        v.append("subject_does_not_match_template")
+    if " across ." in (body or "") or (body or "").rstrip().endswith(" across"):
+        v.append("dangling_across")
+    return v
 
 
 def find_style_violations(text: str) -> list[str]:
@@ -492,6 +604,108 @@ def fallback_counts() -> dict[str, int]:
 def _record_fallback(reasons: list[str]) -> None:
     for reason in reasons:
         _fallback_counts[reason] = _fallback_counts.get(reason, 0) + 1
+
+
+# ---------------------------------------------------------------------------
+# Block 2 (run-32): the one generated paragraph left in the email.
+#
+# It must open with "You" and it must carry at least two responsibility
+# phrases traceable to the POSTING DESCRIPTION. When the posting has no
+# description, the role family's canonical responsibilities are used instead
+# and the draft is marked block2_generic for operator attention.
+#
+# TODAY THAT GENERIC PATH IS THE ONLY PATH, and that is a data gap, not a
+# design choice. NormalizedJob carries a `description` and the JSearch adapter
+# fills it (scanner/connectors/adapters/jsearch.py sets it to the first 2000
+# chars of job_description), but it is dropped before it ever reaches a draft:
+# signal_pipeline._posting_row() does not copy it, wd_dbc.insert_postings()
+# does not list it, and wd_postings has no such column. So every posting
+# arrives here description-less, from every source, not just TinyFish.
+# Composition below is written to use a description the moment one is
+# supplied, and the traceability check is tested against real description
+# text, so wiring the column through is the only remaining step. See
+# BUILD_LOG for the exact three-line change.
+# ---------------------------------------------------------------------------
+_STEM_SUFFIXES = ("ing", "ions", "ion", "es", "s", "ed")
+
+# Function words are not evidence. Without this, "You will close the submarine
+# hatch" scores two matches against a posting that says "will own month-end
+# close" -- "will" and "close" are both present, and the phrase reads as
+# traceable while saying nothing the posting supports.
+_NON_EVIDENCE_WORDS = frozenset({
+    "will", "with", "this", "that", "them", "they", "their", "your", "yours",
+    "have", "has", "been", "from", "into", "each", "every", "some", "also",
+    "already", "across", "about", "while", "when", "where", "which", "than",
+    "then", "there", "here", "into", "over", "under", "must", "should",
+    "would", "could", "including", "include", "includes", "well", "role",
+    "team", "work", "working", "position", "candidate", "responsibilities",
+    "other", "duties", "such", "these", "those", "make", "made", "take",
+})
+
+
+def _stem(word: str) -> str:
+    low = word.lower()
+    for suffix in _STEM_SUFFIXES:
+        if len(low) > len(suffix) + 3 and low.endswith(suffix):
+            return low[: -len(suffix)]
+    return low
+
+
+def _stem_set(text: str) -> set:
+    return {_stem(w) for w in re.findall(r"[A-Za-z]{4,}", text or "")}
+
+
+def responsibility_phrases_traceable(block2: str, posting_description: str) -> int:
+    """How many responsibility phrases in `block2` trace back to the posting
+    description, by substring or close-stem match.
+
+    A phrase counts when the description contains it outright, or when its
+    content words (4+ letters) match the description by stem: at least two of
+    them, and at least half the phrase. So "reconciling CAM charges" in the
+    posting supports "bank reconciliations" in the email, while a phrase that
+    merely borrows one common word does not.
+
+    Requiring EVERY content word to match (the first version) was too strict
+    to be useful: it rejected "You already run month-end close" against a
+    description saying "own month-end close", because "already" is not in the
+    posting. Connective words the model chooses are not the evidence; the
+    responsibility nouns are."""
+    if not (block2 or "").strip() or not (posting_description or "").strip():
+        return 0
+    desc_low = posting_description.lower()
+    desc_stems = _stem_set(posting_description)
+    hits = 0
+    for phrase in re.split(r"[,.;]| and | plus ", block2):
+        phrase = phrase.strip()
+        if len(phrase) < 6:
+            continue
+        if phrase.lower() in desc_low:
+            hits += 1
+            continue
+        words = [w for w in re.findall(r"[A-Za-z]{4,}", phrase)
+                 if w.lower() not in _NON_EVIDENCE_WORDS]
+        if not words:
+            continue
+        matched = sum(1 for w in words if _stem(w) in desc_stems)
+        if matched >= 2 and matched * 2 >= len(words):
+            hits += 1
+    return hits
+
+
+MIN_TRACEABLE_PHRASES = 2
+
+
+def generic_block2(firm_short_name: str, role_title: str, family_responsibilities: list) -> str:
+    """The block2_generic fallback: the role family's canonical
+    responsibilities, opened with "You" as the template requires. Deterministic
+    -- no model involved -- so a posting with no description still produces a
+    grammatical, honest paragraph instead of an invented one."""
+    items = [r for r in (family_responsibilities or []) if r]
+    if not items:
+        return ""
+    listed = ", ".join(items[:-1]) + " and " + items[-1] if len(items) > 1 else items[0]
+    return (f"You are hiring a {role_title} at {firm_short_name}, which means "
+            f"{listed} are landing on someone's desk every month.")
 
 
 def _fallback_blocks(research: dict) -> tuple[str, str]:
@@ -785,50 +999,78 @@ def _generate_blocks(firm_name: str, research: dict, posting_title: str, posting
 def draft_email(firm_name: str, poc_first_name: str, poc_email: str, posting_title: str,
                 posting_url: str, titles: list[str], posting_count: int,
                 firm_short_name: str, research: dict, deck_attached: bool = False,
-                progress: Progress = _noop) -> dict:
+                progress: Progress = _noop, posting_description: str = "") -> dict:
     """Entry point for one firm. Returns {subject, to, body,
-    thin_personalization, word_count, block_2, block_4}.
+    thin_personalization, word_count, block_2, block2_generic, role_family}.
 
     `deck_attached` must reflect whether the caller is ACTUALLY going to
-    attach a deck to the Gmail draft this content ends up in -- Block 6's
-    wording and this check both key off the same value the caller passes,
-    so the claim and the attachment can never diverge."""
-    b1 = block_1(poc_first_name, firm_short_name, posting_title, posting_count)
-    b3 = _BLOCK_3
-    b5 = _BLOCK_5
-    b6 = block_6(posting_url, deck_attached)
-    corpus_text = grounding_corpus(research, firm_name, posting_title, posting_url, titles, posting_count)
+    attach a deck to the Gmail draft this content ends up in -- the CTA
+    paragraph's attachment sentence and the required-fact check both key off
+    the same value, so the claim and the attachment can never diverge.
+
+    `posting_description` is the posting body when one exists. Nothing
+    persists it today (see the Block 2 note above), so it defaults to "" and
+    the generic path runs."""
+    role_title = posting_title
+    role = role_families.role_variables(role_title, posting_description)
+
+    corpus_text = grounding_corpus(research, firm_name, posting_title, posting_url,
+                                   titles, posting_count)
     firm_oneliner = str((research or {}).get("firm_oneliner") or "").strip()
 
+    # --- Block 2: generated when the posting supports it, generic otherwise --
+    block2, block2_generic_flag = "", False
+    if (posting_description or "").strip():
+        generated, _b4, b2_fallback, _b4_fallback = _generate_blocks(
+            firm_name, research, posting_title, posting_url, titles, posting_count, progress)
+        traceable = responsibility_phrases_traceable(generated, posting_description)
+        opens_with_you = generated.strip().startswith("You")
+        if generated.strip() and not b2_fallback and opens_with_you \
+                and traceable >= MIN_TRACEABLE_PHRASES:
+            block2 = generated.strip()
+        else:
+            progress(f"{firm_name}: Block 2 fell back to the role-family text "
+                     f"(opens_with_you={opens_with_you}, traceable_phrases={traceable}).")
+    if not block2:
+        block2 = generic_block2(firm_short_name, role_title, role["responsibilities"])
+        block2_generic_flag = True
+
+    opening = para_opening(poc_first_name, role_title, firm_short_name)
+    math = para_math(role["role_pain"])
+    credential = para_credential(role["role_mapped_stack"], role["systems_if_known"])
+    offer = para_offer(role["role_cadence"])
+    cta = para_cta(deck_attached)
+    signoff = para_signoff(posting_url)
+
+    body = "\n\n".join(p for p in (opening, block2, math, credential, offer, cta, signoff)
+                       if p.strip())
+    subject = _subject(role_title)
+
     req_violations = find_required_fact_violations(
-        b1, b6, b3, posting_title, firm_short_name, posting_url, corpus_text, deck_attached,
-        firm_oneliner=firm_oneliner)
+        opening, signoff, body, posting_title, firm_short_name, posting_url, corpus_text,
+        deck_attached, firm_oneliner=firm_oneliner)
     if req_violations:
-        # Should be unreachable given Python assembly above -- this is the
-        # defensive backstop for a caller passing drifted facts, per FIX 10's
-        # own philosophy: don't just trust construction, verify it happened.
         raise ValueError(f"{firm_name}: required-fact check failed: {', '.join(req_violations)}")
 
-    block2, block4, b2_fallback, b4_fallback = _generate_blocks(
-        firm_name, research, posting_title, posting_url, titles, posting_count, progress)
+    body_violations = find_body_violations(body, subject, block2, role_title)
+    if body_violations:
+        raise ValueError(f"{firm_name}: body validation failed: {', '.join(body_violations)}")
 
-    fixed_word_count = sum(len(b.split()) for b in (b1, b3, b5, b6) if b)
-    block2, block4 = _trim_to_budget(block2, block4, fixed_word_count, block4_is_fixed=b4_fallback)
-
-    body = "\n\n".join(b for b in (b1, block2, b3, block4, b5, b6) if b.strip())
     word_count = len(body.split())
     if word_count > config.EMAIL_MAX_WORDS:
-        progress(f"{firm_name}: email still over {config.EMAIL_MAX_WORDS} words "
-                 f"({word_count}) after trim -- shipping anyway, flag for review.")
+        progress(f"{firm_name}: email over {config.EMAIL_MAX_WORDS} words "
+                 f"({word_count}) -- shipping anyway, flag for review.")
 
     return {
-        "subject": _subject(posting_title, posting_count),
+        "subject": subject,
         "to": poc_email,
         "body": body,
-        "thin_personalization": bool(b2_fallback or b4_fallback),
+        "thin_personalization": block2_generic_flag,
+        "block2_generic": block2_generic_flag,
+        "role_family": role["family"],
         "word_count": word_count,
         "block_2": block2,
-        "block_4": block4,
+        "block_4": "",
     }
 
 
@@ -1907,6 +2149,7 @@ def _draft_one_firm(firm: dict, contacted_this_run: set[str], progress: Progress
         posting_title=posting_title, posting_url=posting_url, titles=titles,
         posting_count=posting_count, firm_short_name=short_name, research=research,
         deck_attached=bool(deck_pdf_path), progress=progress,
+        posting_description=next((p.get("description") for p in postings if p.get("description")), ""),
     )
 
     gmail_result = gmail_client.create_draft(

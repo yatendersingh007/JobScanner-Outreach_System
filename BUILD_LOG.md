@@ -2892,3 +2892,152 @@ write a real file and to assert the returned path is the one the fresh file was
 MOVED to, plus that the converter was handed a staged copy. No vendored `.py`
 file touched. No scan command run.
 
+
+## v2 signal email: deterministic template plus a role-family table - 2026-08-14
+
+Replaces the v1 six-block template. Harp's copy is reproduced
+character-for-character; every slot except Block 2 is filled from a
+deterministic source. The deck path is untouched: the per-firm pitch deck PDF
+is still the attachment, generated and attached exactly as before.
+
+### Item 6 first: how each v1 required-fact check maps onto the v2 body
+
+Every check survives. None was deleted.
+
+| v1 check | v2 |
+|---|---|
+| `missing_posting_title_in_block1` | `missing_role_title_in_opening`. `{role_title}` IS the posting title verbatim, in the opening paragraph. |
+| `posting_title_not_grounded` | unchanged. Still the corpus check. |
+| `missing_firm_name_in_block1` | `missing_firm_name_in_opening`. `{company_name}` in the same sentence. |
+| `missing_posting_url_in_block6` | `missing_posting_url_in_signoff`. The P.S. still carries `{job_posting_url}`. |
+| `firm_oneliner_not_grounded` | unchanged. Block 2 still draws on research. |
+| `deck_attachment_claim_mismatch` | kept, re-keyed. v1 matched "The deck is attached."; v2 matches "I've attached an overview". |
+| `block3_modified` / `missing_dollar_ranges_in_block3` | split into `missing_dollar_ranges`, `math_sentence_modified`, `offer_sentence_modified`. v2 has no single money block: `$145K to $180K` is in the math paragraph and `$55K to $75K` in the offer paragraph, so there is nothing to compare against one constant. Both ranges and both fixed sentences are checked in the composed body instead. |
+
+The attachment check matters more than it looks. The v2 copy states the
+attachment unconditionally, but `_generate_deck` can legitimately return None
+(no soffice, a generation failure, or the run-31 case where reconversion
+cannot produce a PDF matching the patched PPTX). So the sentence is
+conditional in code and the mismatch check is kept in both directions.
+
+### Blocking finding: the posting description is never persisted
+
+Item 3 asks Block 2 to carry two responsibility phrases traceable to the
+posting description, and item 4 asks the systems clause to scan posting text.
+`NormalizedJob` has a `description` and the JSearch adapter fills it
+(`scanner/connectors/adapters/jsearch.py` sets it to the first 2000 chars of
+`job_description`), but it is dropped before drafting:
+
+- `signal_pipeline._posting_row()` does not copy it,
+- `wd_dbc.insert_postings()` does not list it,
+- `wd_postings` has no such column.
+
+So EVERY posting arrives description-less, from every source, not only
+TinyFish. Today that means `block2_generic` on every draft and the systems
+clause always omitted.
+
+Everything is written to work the moment a description exists:
+`draft_email(..., posting_description="")` is threaded from `_draft_one_firm`
+(reading a `description` key off the posting row, harmless while absent), the
+traceability check is tested against real description text, and the systems
+clause is tested both ways. Wiring it up is three changes plus a migration:
+add `description` to `wd_postings`, to the `cols` list in `insert_postings`,
+and to `_posting_row`. Not done here: it is a schema change to the shared
+`outreach` database and was not in scope.
+
+### 1. The template
+
+Six paragraphs, all fixed except Block 2. Subject
+`Your {role_title} hire for $55K, not $180K`.
+
+**One feature is retired, deliberately.** v1 had a multi-posting variant
+("Your {n} open finance roles" / "You have {n} finance roles open at ...
+including ..."). The v2 copy has no such branch and the instruction was to
+implement it exactly, so a firm hiring three seats now gets an email about
+the first distinct title. `posting_count` is still computed and still reaches
+`wd_drafts`; nothing reads it into the body.
+
+### 2. src/role_families.py
+
+Seven families, each supplying `pain`, `cadence`, a base `stack` and canonical
+`responsibilities`. Nothing in the module is LLM-generated and nothing in it
+may be. `controller` is the declared default.
+
+Coverage is asserted against `scanner/config.yaml` itself, so adding a query
+or a target without deciding its family fails the suite. All 20 aggregator
+queries and every enabled TinyFish target map. **Six of the 20 aggregator
+queries land on the `controller` default** because the spec's table does not
+name them: `corporate accountant`, `property management accountant`, `project
+accountant`, `construction accountant`, `family office accountant`, `tax
+accountant`. That is the declared default behaving correctly, and the
+assignment is pinned in a test so it is visible rather than incidental. Worth
+a look: `property management accountant` and `project accountant` are
+arguably property_accounting, and moving them is a one-line table edit.
+
+### 3. Block 2
+
+Generated only when a description exists AND the result opens with "You" AND
+at least two responsibility phrases trace back to the description. Otherwise
+the deterministic `generic_block2()` runs off the family's canonical
+responsibilities and the draft is flagged `block2_generic` (surfaced on the
+returned dict and as `thin_personalization`). With no description the LLM is
+not called at all for Block 2, which a test asserts by making the call raise.
+
+Traceability is substring or close-stem, needing at least two content-word
+matches covering at least half the phrase. **Two calibration bugs found by
+testing:** requiring EVERY content word rejected "You already run month-end
+close" against a posting saying "own month-end close", because "already" is
+not in the posting. And once relaxed, function words became evidence: "You
+will close the submarine hatch" scored two matches against "will own
+month-end close". A non-evidence word list fixes the second.
+
+### 4. Stack and systems
+
+`{role_mapped_stack}` is the family base plus additions the posting itself
+names (CAM, waterfall, capital calls, covenants, consolidations, 1031,
+budget, audit, tenant billing, construction draws), deduplicated, base order
+preserved. `{systems_if_known}` scans for the eight named systems only,
+word-boundary matched so "MRI" does not fire inside "MRIs", longest-first so
+"Juniper Square" is not shadowed.
+
+With no system found the credential sentence uses a SEPARATE template ending
+at the stack list, so there is no dangling "across". Enforced three ways: a
+unit test on the paragraph, an end-to-end test on the composed body, and a
+`dangling_across` validator.
+
+### 5. Hard-fail validators
+
+`find_body_violations()` on the composed body: Block 2 opens with "You"; no em
+or en dash anywhere; none of "my experience", "great fit", "my background",
+"I am writing to"; subject exactly matches the template; no dangling "across".
+A hit raises rather than shipping.
+
+### Known consequence: the length guard now fires on nearly every draft
+
+The fixed copy alone is **233 words**, and the generic Block 2 adds ~35, so a
+typical body is **268** against `EMAIL_MAX_WORDS=260` -- over by 8. That is a
+warning, not a failure (it always was), but it will now log on almost every
+draft, which makes the signal useless. `EMAIL_MAX_WORDS` is left at its
+current value because changing it was not in scope; raising it to ~300 would
+restore the guard's meaning. Flagging rather than deciding.
+
+Also note v2 has one generated block, not two, so the v1 trim mechanism
+(`_trim_to_budget`, trim Block 4 then Block 2) no longer runs; Block 4 no
+longer exists. `_trim_to_budget` and the v1 fixed blocks remain in the module
+and are still used by the block-generation path's own tests.
+
+### Verified
+
+Composed real bodies for both live `wd_firms` rows and read them end to end.
+Choice NY resolves to `property_accounting`, Neal's "Treasury & Financial
+Analyst" to `treasury` with "The cash does not stop moving" and "cash
+reporting calendar". Both omit the systems clause cleanly. A composition with
+a Yardi-bearing description emits ", across Yardi." and, when the live LLM
+returned an ungrounded figure, correctly fell back to the generic block, which
+is the pre-existing grounding guard doing its job.
+
+815 tests pass, up from 696 (73 new in `tests/test_role_families.py`, the rest
+in `tests/test_signal_drafting.py`). Seventeen v1-template tests were remapped
+to the v2 paragraphs rather than deleted. No vendored `.py` file touched. No
+scan command run.
+

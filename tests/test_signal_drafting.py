@@ -163,32 +163,57 @@ def test_block4_argument_abstract_risk_fails():
     assert v == ["missing_concrete_cost"]
 
 
-# ---------------------------------------------------------------------------
-# Block 6: the deck-attached claim must never diverge from the attachment
-# ---------------------------------------------------------------------------
-def test_block6_omits_deck_sentence_when_not_attached():
-    text = sd.block_6("https://boards.example/jobs/123", deck_attached=False)
-    assert "deck is attached" not in text.lower()
-    assert "https://boards.example/jobs/123" in text  # the URL line is unconditional
+URL_FIXTURE = "https://boards.example/jobs/123"
 
 
-def test_block6_includes_deck_sentence_when_attached():
-    text = sd.block_6("https://boards.example/jobs/123", deck_attached=True)
-    assert "The deck is attached." in text
+# ---------------------------------------------------------------------------
+# v2 CTA + sign-off: the attachment claim must never diverge from the
+# attachment. v1 carried the claim in Block 6 ("The deck is attached."); v2
+# carries it in the CTA paragraph ("I've attached an overview..."), and the
+# P.S. carries the URL unconditionally in both.
+# ---------------------------------------------------------------------------
+def test_cta_omits_attachment_sentence_when_not_attached():
+    text = sd.para_cta(deck_attached=False)
+    assert "attached" not in text.lower()
+    assert "Can we do a call next week?" in text
+
+
+def test_cta_includes_attachment_sentence_when_attached():
+    text = sd.para_cta(deck_attached=True)
+    assert text.startswith("I've attached an overview of how we run this function.")
+    assert "Can we do a call next week?" in text
+
+
+def test_signoff_always_carries_the_posting_url():
+    text = sd.para_signoff("https://boards.example/jobs/123")
     assert "https://boards.example/jobs/123" in text
+    assert text.startswith("Harp\nFounder, X Analyst")
 
 
 # ---------------------------------------------------------------------------
 # Required facts
 # ---------------------------------------------------------------------------
+def _v2_body(deck_attached=False, url=URL_FIXTURE):
+    """A minimal composed body carrying everything the required-fact check
+    looks for, so each test can perturb exactly one thing."""
+    return "\n\n".join([
+        sd.para_opening("Jane", "Fund Controller", "Acme Capital"),
+        sd.para_math("The close does not pause"),
+        sd.para_credential("month-end close", ""),
+        sd.para_offer("close calendar"),
+        sd.para_cta(deck_attached),
+        sd.para_signoff(url),
+    ])
+
+
 def test_required_facts_pass_when_assembled_correctly():
-    b1 = sd.block_1("Jane", "Acme Capital", "Fund Controller", 1)
-    b6 = sd.block_6("https://boards.example/jobs/123", deck_attached=False)
+    opening = sd.para_opening("Jane", "Fund Controller", "Acme Capital")
+    signoff = sd.para_signoff(URL_FIXTURE)
     corpus = sd.grounding_corpus({}, "Acme Capital", "Fund Controller",
-                                 "https://boards.example/jobs/123", ["Fund Controller"], 1)
+                                 URL_FIXTURE, ["Fund Controller"], 1)
     v = sd.find_required_fact_violations(
-        b1, b6, sd._BLOCK_3, "Fund Controller", "Acme Capital",
-        "https://boards.example/jobs/123", corpus, deck_attached=False)
+        opening, signoff, _v2_body(), "Fund Controller", "Acme Capital",
+        URL_FIXTURE, corpus, deck_attached=False)
     assert v == []
 
 
@@ -196,63 +221,83 @@ def test_reworded_posting_title_fails_required_fact_check():
     """The posting_title used to assemble Block 1 must match the ground-truth
     corpus verbatim. A caller that reworded the title before calling block_1
     (e.g. paraphrased or re-cased it) is caught here, not shipped silently."""
-    b1 = sd.block_1("Jane", "Acme Capital", "Senior Fund Controller", 1)
-    b6 = sd.block_6("https://boards.example/jobs/123", deck_attached=False)
+    opening = sd.para_opening("Jane", "Senior Fund Controller", "Acme Capital")
     # The corpus reflects the ACTUAL posting title, which differs from what
-    # was used to build block_1 above -- simulating a reworded title.
+    # was used to build the opening above -- simulating a reworded title.
     corpus = sd.grounding_corpus({}, "Acme Capital", "Fund Controller",
-                                 "https://boards.example/jobs/123", ["Fund Controller"], 1)
+                                 URL_FIXTURE, ["Fund Controller"], 1)
     v = sd.find_required_fact_violations(
-        b1, b6, sd._BLOCK_3, "Senior Fund Controller", "Acme Capital",
-        "https://boards.example/jobs/123", corpus, deck_attached=False)
+        opening, sd.para_signoff(URL_FIXTURE), _v2_body(), "Senior Fund Controller",
+        "Acme Capital", URL_FIXTURE, corpus, deck_attached=False)
     assert "posting_title_not_grounded" in v
 
 
-def test_missing_firm_name_in_block1_fails():
-    b1 = sd.block_1("Jane", "Acme Capital", "Fund Controller", 1)
+def test_missing_firm_name_in_opening_fails():
+    opening = sd.para_opening("Jane", "Fund Controller", "Acme Capital")
     v = sd.find_required_fact_violations(
-        b1, "P.S. https://x.example", sd._BLOCK_3, "Fund Controller", "A Totally Different Firm",
+        opening, "P.S. https://x.example", _v2_body(url="https://x.example"),
+        "Fund Controller", "A Totally Different Firm",
         "https://x.example", "corpus text", deck_attached=False)
-    assert "missing_firm_name_in_block1" in v
+    assert "missing_firm_name_in_opening" in v
 
 
-def test_missing_posting_url_in_block6_fails():
-    b1 = sd.block_1("Jane", "Acme Capital", "Fund Controller", 1)
+def test_missing_posting_url_in_signoff_fails():
+    opening = sd.para_opening("Jane", "Fund Controller", "Acme Capital")
     v = sd.find_required_fact_violations(
-        b1, "P.S. wrong url", sd._BLOCK_3, "Fund Controller", "Acme Capital",
-        "https://boards.example/jobs/123", "corpus text with Fund Controller", deck_attached=False)
-    assert "missing_posting_url_in_block6" in v
+        opening, "P.S. wrong url", _v2_body(), "Fund Controller", "Acme Capital",
+        URL_FIXTURE, "corpus text with Fund Controller", deck_attached=False)
+    assert "missing_posting_url_in_signoff" in v
 
 
-def test_block3_dollar_ranges_required():
+def test_dollar_ranges_required_in_the_body():
+    """v1 compared one fixed Block 3 against a constant. v2 splits the two
+    ranges across the math and offer paragraphs, so both are checked in the
+    composed body along with their fixed sentences."""
     v = sd.find_required_fact_violations(
-        "block1 text", "block6 text", "A modified Block 3 with no dollar ranges.",
+        "opening text", "signoff text", "A body with no dollar ranges at all.",
         "Fund Controller", "Acme Capital", "https://x.example", "corpus", deck_attached=False)
-    assert "block3_modified" in v
+    assert "missing_dollar_ranges" in v
+    assert "math_sentence_modified" in v
+    assert "offer_sentence_modified" in v
+
+
+def test_dollar_ranges_present_in_a_real_body():
+    body = _v2_body()
+    assert "$145K to $180K" in body and "$55K to $75K" in body
+    v = sd.find_required_fact_violations(
+        sd.para_opening("Jane", "Fund Controller", "Acme Capital"),
+        sd.para_signoff(URL_FIXTURE), body, "Fund Controller", "Acme Capital",
+        URL_FIXTURE, "corpus with Fund Controller", deck_attached=False)
+    assert "missing_dollar_ranges" not in v
+    assert "math_sentence_modified" not in v
+    assert "offer_sentence_modified" not in v
 
 
 def test_deck_attachment_claim_mismatch_when_claimed_but_not_attached():
-    b6 = sd.block_6("https://x.example", deck_attached=True)  # claims attached
+    body = _v2_body(deck_attached=True, url="https://x.example")   # claims attached
     v = sd.find_required_fact_violations(
-        "block1 text with Fund Controller and Acme Capital", b6, sd._BLOCK_3,
+        sd.para_opening("Jane", "Fund Controller", "Acme Capital"),
+        sd.para_signoff("https://x.example"), body,
         "Fund Controller", "Acme Capital", "https://x.example",
-        "corpus with Fund Controller", deck_attached=False)  # but it isn't
+        "corpus with Fund Controller", deck_attached=False)        # but it isn't
     assert "deck_attachment_claim_mismatch" in v
 
 
 def test_deck_attachment_claim_mismatch_when_attached_but_not_claimed():
-    b6 = sd.block_6("https://x.example", deck_attached=False)  # doesn't claim attached
+    body = _v2_body(deck_attached=False, url="https://x.example")  # no claim
     v = sd.find_required_fact_violations(
-        "block1 text with Fund Controller and Acme Capital", b6, sd._BLOCK_3,
+        sd.para_opening("Jane", "Fund Controller", "Acme Capital"),
+        sd.para_signoff("https://x.example"), body,
         "Fund Controller", "Acme Capital", "https://x.example",
-        "corpus with Fund Controller", deck_attached=True)  # but it is
+        "corpus with Fund Controller", deck_attached=True)         # but it is
     assert "deck_attachment_claim_mismatch" in v
 
 
 def test_deck_attachment_claim_matches_when_both_true():
-    b6 = sd.block_6("https://x.example", deck_attached=True)
+    body = _v2_body(deck_attached=True, url="https://x.example")
     v = sd.find_required_fact_violations(
-        "block1 text with Fund Controller and Acme Capital", b6, sd._BLOCK_3,
+        sd.para_opening("Jane", "Fund Controller", "Acme Capital"),
+        sd.para_signoff("https://x.example"), body,
         "Fund Controller", "Acme Capital", "https://x.example",
         "corpus with Fund Controller", deck_attached=True)
     assert "deck_attachment_claim_mismatch" not in v
@@ -272,25 +317,23 @@ def test_required_facts_pass_when_oneliner_is_empty():
     """Thin research is an honest, allowed state -- _fallback_blocks already
     lets Block 2 go blank rather than ship filler; the required-fact check
     must not punish that."""
-    b1 = sd.block_1("Jane", "Acme Capital", "Fund Controller", 1)
-    b6 = sd.block_6("https://boards.example/jobs/123", deck_attached=False)
     corpus = sd.grounding_corpus({}, "Acme Capital", "Fund Controller",
-                                 "https://boards.example/jobs/123", ["Fund Controller"], 1)
+                                 URL_FIXTURE, ["Fund Controller"], 1)
     v = sd.find_required_fact_violations(
-        b1, b6, sd._BLOCK_3, "Fund Controller", "Acme Capital",
-        "https://boards.example/jobs/123", corpus, deck_attached=False, firm_oneliner="")
+        sd.para_opening("Jane", "Fund Controller", "Acme Capital"),
+        sd.para_signoff(URL_FIXTURE), _v2_body(), "Fund Controller", "Acme Capital",
+        URL_FIXTURE, corpus, deck_attached=False, firm_oneliner="")
     assert v == []
 
 
 def test_required_facts_pass_when_oneliner_is_grounded_in_the_research_corpus():
-    b1 = sd.block_1("Jane", "Acme Capital", "Fund Controller", 1)
-    b6 = sd.block_6("https://boards.example/jobs/123", deck_attached=False)
     research = {"firm_oneliner": "A multifamily investment manager active in the Southeast."}
     corpus = sd.grounding_corpus(research, "Acme Capital", "Fund Controller",
-                                 "https://boards.example/jobs/123", ["Fund Controller"], 1)
+                                 URL_FIXTURE, ["Fund Controller"], 1)
     v = sd.find_required_fact_violations(
-        b1, b6, sd._BLOCK_3, "Fund Controller", "Acme Capital",
-        "https://boards.example/jobs/123", corpus, deck_attached=False,
+        sd.para_opening("Jane", "Fund Controller", "Acme Capital"),
+        sd.para_signoff(URL_FIXTURE), _v2_body(), "Fund Controller", "Acme Capital",
+        URL_FIXTURE, corpus, deck_attached=False,
         firm_oneliner=research["firm_oneliner"])
     assert "firm_oneliner_not_grounded" not in v
 
@@ -299,13 +342,12 @@ def test_firm_oneliner_not_grounded_fails_when_missing_from_corpus():
     """A caller passing a firm_oneliner that never made it into the corpus
     the LLM/fallback actually drew from -- e.g. research and corpus_text
     built from two different objects that drifted apart."""
-    b1 = sd.block_1("Jane", "Acme Capital", "Fund Controller", 1)
-    b6 = sd.block_6("https://boards.example/jobs/123", deck_attached=False)
     corpus = sd.grounding_corpus({}, "Acme Capital", "Fund Controller",
-                                 "https://boards.example/jobs/123", ["Fund Controller"], 1)
+                                 URL_FIXTURE, ["Fund Controller"], 1)
     v = sd.find_required_fact_violations(
-        b1, b6, sd._BLOCK_3, "Fund Controller", "Acme Capital",
-        "https://boards.example/jobs/123", corpus, deck_attached=False,
+        sd.para_opening("Jane", "Fund Controller", "Acme Capital"),
+        sd.para_signoff(URL_FIXTURE), _v2_body(), "Fund Controller", "Acme Capital",
+        URL_FIXTURE, corpus, deck_attached=False,
         firm_oneliner="A description that never reached the research object.")
     assert "firm_oneliner_not_grounded" in v
 
@@ -583,7 +625,7 @@ def test_draft_email_full_assembly_prints_and_grounds_url():
     assert "Fund Controller" in content["body"]
     assert "https://boards.example/jobs/456" in content["body"]
     assert content["word_count"] <= sd.config.EMAIL_MAX_WORDS
-    assert content["subject"] == "Your Fund Controller opening"
+    assert content["subject"] == "Your Fund Controller hire for $55K, not $180K"
     assert "deck is attached" not in content["body"].lower()  # deck_attached defaults False
 
 
@@ -595,18 +637,21 @@ def test_draft_email_claims_deck_attached_only_when_told_to():
         research={"firm_oneliner": "A multifamily investment manager active in the Southeast."},
         deck_attached=True,
     )
-    assert "The deck is attached." in content["body"]
+    assert "I've attached an overview of how we run this function." in content["body"]
 
 
-def test_draft_email_multi_posting_subject_and_block1():
+def test_draft_email_subject_is_the_v2_template_regardless_of_posting_count():
+    """v2 has no multi-posting variant. A firm with several open seats gets an
+    email about the first distinct title; posting_count no longer reaches the
+    subject or the body."""
     content = sd.draft_email(
         firm_name="Acme Capital Partners", poc_first_name="Jane", poc_email="jane@acme.example",
         posting_title="Fund Controller", posting_url="https://boards.example/jobs/456",
         titles=["Fund Controller", "Staff Accountant"], posting_count=2,
         firm_short_name="Acme Capital", research={},
     )
-    assert content["subject"] == "Your 2 open finance roles"
-    assert "2 finance roles open at Acme Capital" in content["body"]
+    assert content["subject"] == "Your Fund Controller hire for $55K, not $180K"
+    assert "2 finance roles" not in content["body"]
 
 
 # ---------------------------------------------------------------------------
@@ -1496,7 +1541,7 @@ def test_draft_for_run_attaches_the_deck_when_generation_succeeds(monkeypatch):
     assert row["deck_pdf_path"] == "generated_decks_c/Firm_A_Pitch.pdf"
     assert row["deck_attached"] is True
     assert gmail_calls == ["generated_decks_c/Firm_A_Pitch.pdf"]
-    assert "The deck is attached." in row["body"]
+    assert "I've attached an overview of how we run this function." in row["body"]
 
 
 def test_draft_for_run_resets_and_reports_fallback_counts(monkeypatch):
@@ -2722,4 +2767,321 @@ def test_generate_deck_ships_the_original_pdf_when_the_shape_pass_itself_raises(
 
     assert result == str(pdf)
     assert any("shipping the deck as generated" in m for m in progressed)
+
+
+
+# ---------------------------------------------------------------------------
+# v2 signal email (run-32). Harp's copy, reproduced character-for-character,
+# with every slot filled deterministically except Block 2.
+# ---------------------------------------------------------------------------
+from src import role_families as rf   # noqa: E402
+
+
+def _compose(role_title="Property Accountant", firm="Acme Capital", description="",
+             deck_attached=False, research=None, first="Jane"):
+    return sd.draft_email(
+        firm_name=firm, poc_first_name=first, poc_email="j@acme.example",
+        posting_title=role_title, posting_url="https://boards.example/jobs/7",
+        titles=[role_title], posting_count=1, firm_short_name=firm,
+        research=research if research is not None else {},
+        deck_attached=deck_attached, posting_description=description)
+
+
+# --- subject ---------------------------------------------------------------
+def test_subject_matches_the_template_exactly():
+    assert sd._subject("Property Accountant") == \
+        "Your Property Accountant hire for $55K, not $180K"
+
+
+def test_subject_uses_the_posting_title_verbatim():
+    content = _compose(role_title="SR Property Accountant")
+    assert content["subject"] == "Your SR Property Accountant hire for $55K, not $180K"
+
+
+def test_subject_validator_rejects_a_drifted_subject():
+    v = sd.find_body_violations("body", "Your other subject", "You do things.", "Controller")
+    assert "subject_does_not_match_template" in v
+
+
+# --- fixed copy, verbatim --------------------------------------------------
+def test_opening_paragraph_is_the_template_copy():
+    assert sd.para_opening("Jane", "Property Accountant", "Acme Capital") == (
+        "Hi Jane,\n\n"
+        "I run X Analyst. You have a Property Accountant opening at Acme Capital, "
+        "and we are the alternative to that hire.")
+
+
+def test_math_paragraph_is_the_template_copy():
+    assert sd.para_math("The close does not pause") == (
+        "A US fully loaded hire for that seat runs $145K to $180K, and the search takes "
+        "three months. The close does not pause while you run it. Most firms bridge it by "
+        "pushing the work onto a controller who is already at capacity, or by paying a "
+        "provider whose partners never open the ledger. Both cost more than the seat.")
+
+
+def test_offer_paragraph_is_the_template_copy():
+    assert sd.para_offer("close calendar") == (
+        "We place a dedicated senior operator on your team for $55K to $75K. Same talent "
+        "pool the institutional shops recruit, top 0.5% CA/CPAs, paid top of market, "
+        "embedded in your systems and your close calendar. Exclusively yours, live in 10 days.")
+
+
+def test_signoff_is_the_template_copy():
+    assert sd.para_signoff("https://x.example/1") == (
+        "Harp\nFounder, X Analyst\n\n"
+        "P.S. The posting is here if I have the wrong one: https://x.example/1")
+
+
+# --- the systems clause ----------------------------------------------------
+def test_systems_clause_present_when_the_posting_names_a_system():
+    text = sd.para_credential("property-level books, lender and owner reporting", "Yardi")
+    assert text.endswith("lender and owner reporting, across Yardi.")
+
+
+def test_systems_clause_omitted_entirely_when_no_system_is_named():
+    """The spec's explicit requirement: the sentence ends at "lender and owner
+    reporting" with no dangling "across"."""
+    text = sd.para_credential(
+        ", ".join(rf.BY_KEY["property_accounting"].stack), "")
+
+    assert text.endswith("lender and owner reporting.")
+    assert "across" not in text
+    assert " ." not in text
+
+
+def test_composed_body_has_no_dangling_across_when_no_system_is_named():
+    content = _compose(role_title="Property Accountant", description="")
+    assert "across" not in content["body"]
+    assert "lender and owner reporting." in content["body"]
+    assert sd.find_body_violations(
+        content["body"], content["subject"], content["block_2"], "Property Accountant") == []
+
+
+def test_composed_body_carries_the_systems_clause_when_the_posting_names_one():
+    content = _compose(role_title="Property Accountant",
+                       description="Month-end close in Yardi and MRI for a 40-property portfolio.")
+    assert ", across Yardi and MRI." in content["body"]
+
+
+def test_dangling_across_validator_fires():
+    assert "dangling_across" in sd.find_body_violations(
+        "The stack this seat needs: month-end close, across .",
+        sd._subject("Controller"), "You run things.", "Controller")
+
+
+# --- hard-fail validators --------------------------------------------------
+def test_block2_must_open_with_you():
+    v = sd.find_body_violations("body", sd._subject("Controller"),
+                                "The firm runs 40 properties.", "Controller")
+    assert "block2_does_not_open_with_you" in v
+
+
+def test_block2_opening_with_you_passes():
+    v = sd.find_body_violations("body", sd._subject("Controller"),
+                                "You run 40 properties.", "Controller")
+    assert "block2_does_not_open_with_you" not in v
+
+
+@pytest.mark.parametrize("dash", ["—", "–"])
+def test_em_dash_anywhere_in_the_body_fails(dash):
+    v = sd.find_body_violations(f"A body with an {dash} in it.", sd._subject("Controller"),
+                                "You run things.", "Controller")
+    assert "em_dash_in_body" in v
+
+
+@pytest.mark.parametrize("phrase", [
+    "my experience", "great fit", "my background", "I am writing to",
+])
+def test_forbidden_phrases_fail(phrase):
+    v = sd.find_body_violations(f"Some text with {phrase} inside.", sd._subject("Controller"),
+                                "You run things.", "Controller")
+    assert f"forbidden_phrase:{phrase.lower()}" in v
+
+
+def test_a_clean_body_has_no_violations():
+    content = _compose()
+    assert sd.find_body_violations(content["body"], content["subject"],
+                                   content["block_2"], "Property Accountant") == []
+
+
+def test_the_template_copy_itself_passes_the_style_checks():
+    """The fixed copy is human-facing output and is held to CLAUDE.md's rules:
+    no em dashes, no semicolons, no curly quotes, no banned words.
+
+    question_mark is excluded deliberately. find_style_violations flags it
+    because a question mark in a GENERATED block is an AI tell, but the CTA
+    ("Can we do a call next week?") is Harp's own copy and the ask is the
+    point of the email."""
+    content = _compose(deck_attached=True)
+    noted = [v for v in sd.find_style_violations(content["body"]) if v != "question_mark"]
+    assert noted == []
+
+
+# --- Block 2: traceability and the generic fallback ------------------------
+_DESCRIPTION = (
+    "The Property Accountant will own month-end close for a 40-property portfolio, "
+    "prepare bank reconciliations, handle CAM reconciliations and true-ups, and "
+    "produce owner reporting packages each month.")
+
+
+def test_traceable_phrases_counts_substring_matches():
+    block2 = "You run month-end close, bank reconciliations and owner reporting packages."
+    assert sd.responsibility_phrases_traceable(block2, _DESCRIPTION) >= 2
+
+
+def test_traceable_phrases_counts_close_stem_matches():
+    """"reconciliations" in the posting supports "reconciliation" in the email."""
+    block2 = "You handle bank reconciliation and prepare owner reporting packages."
+    assert sd.responsibility_phrases_traceable(block2, _DESCRIPTION) >= 2
+
+
+def test_traceable_phrases_ignores_connective_words_the_model_chose():
+    """"already" and "across" are not in the posting; the responsibility nouns
+    are, and they are what the evidence rests on."""
+    block2 = "You already run month-end close across a 40-property portfolio."
+    assert sd.responsibility_phrases_traceable(block2, _DESCRIPTION) >= 1
+
+
+def test_traceable_phrases_rejects_a_phrase_borrowing_one_common_word():
+    block2 = "You will close the submarine hatch."
+    assert sd.responsibility_phrases_traceable(block2, _DESCRIPTION) == 0
+
+
+def test_traceable_phrases_zero_when_nothing_matches():
+    block2 = "You operate submarine periscopes and tune racing bicycles."
+    assert sd.responsibility_phrases_traceable(block2, _DESCRIPTION) == 0
+
+
+@pytest.mark.parametrize("block2,description", [
+    ("", _DESCRIPTION), ("You do things.", ""), ("", ""),
+])
+def test_traceable_phrases_handles_empty_input(block2, description):
+    assert sd.responsibility_phrases_traceable(block2, description) == 0
+
+
+def test_block2_generic_when_the_posting_has_no_description():
+    """Every posting today, since wd_postings does not persist descriptions."""
+    content = _compose(role_title="Fund Accountant", description="")
+
+    assert content["block2_generic"] is True
+    assert content["thin_personalization"] is True
+    assert content["block_2"].startswith("You are hiring a Fund Accountant")
+    for phrase in rf.BY_KEY["fund_accounting"].responsibilities[:2]:
+        assert phrase in content["block_2"]
+
+
+def test_generic_block2_opens_with_you_for_every_family():
+    for key, family in rf.BY_KEY.items():
+        text = sd.generic_block2("Acme Capital", "Some Title", list(family.responsibilities))
+        assert text.startswith("You "), key
+
+
+def test_generic_block2_is_empty_without_responsibilities():
+    assert sd.generic_block2("Acme", "Controller", []) == ""
+
+
+def test_generated_block2_is_used_when_it_is_traceable(monkeypatch):
+    monkeypatch.setattr(
+        sd, "_generate_blocks",
+        lambda *a, **k: ("You handle bank reconciliation and prepare owner "
+                        "reporting packages.", "", False, False))
+
+    content = _compose(description=_DESCRIPTION)
+
+    assert content["block2_generic"] is False
+    assert content["block_2"].startswith("You handle bank reconciliation")
+
+
+def test_generated_block2_rejected_when_it_does_not_open_with_you(monkeypatch):
+    monkeypatch.setattr(
+        sd, "_generate_blocks",
+        lambda *a, **k: ("The firm runs month-end close and bank reconciliations.",
+                        "", False, False))
+
+    content = _compose(description=_DESCRIPTION)
+
+    assert content["block2_generic"] is True
+    assert content["block_2"].startswith("You are hiring")
+
+
+def test_generated_block2_rejected_when_not_enough_phrases_are_traceable(monkeypatch):
+    monkeypatch.setattr(
+        sd, "_generate_blocks",
+        lambda *a, **k: ("You operate submarine periscopes.", "", False, False))
+
+    content = _compose(description=_DESCRIPTION)
+
+    assert content["block2_generic"] is True
+
+
+def test_no_llm_is_called_when_the_posting_has_no_description(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("_generate_blocks must not be called without a description")
+
+    monkeypatch.setattr(sd, "_generate_blocks", boom)
+
+    content = _compose(description="")
+
+    assert content["block2_generic"] is True
+
+
+# --- full composed-body snapshot, one per role family ----------------------
+_FAMILY_SNAPSHOT_TITLE = {
+    "property_accounting": "Property Accountant",
+    "fund_accounting": "Fund Accountant",
+    "controller": "Controller",
+    "treasury": "Treasury Analyst",
+    "ap_ar": "Accounts Payable Specialist",
+    "lease_admin": "Lease Administrator",
+    "underwriting": "Acquisitions Analyst",
+}
+
+
+@pytest.mark.parametrize("family_key,role_title", sorted(_FAMILY_SNAPSHOT_TITLE.items()))
+def test_full_composed_body_snapshot_per_role_family(family_key, role_title):
+    """One end-to-end body per family. Asserts the whole shape rather than a
+    keyword: the paragraph order, the family's own pain and cadence in their
+    fixed sentences, the omitted systems clause, and the validators clean."""
+    family = rf.BY_KEY[family_key]
+    content = _compose(role_title=role_title, firm="Acme Capital", deck_attached=True)
+
+    assert content["role_family"] == family_key
+    expected = "\n\n".join([
+        f"Hi Jane,\n\nI run X Analyst. You have a {role_title} opening at Acme Capital, "
+        "and we are the alternative to that hire.",
+        sd.generic_block2("Acme Capital", role_title, list(family.responsibilities)),
+        f"A US fully loaded hire for that seat runs $145K to $180K, and the search takes "
+        f"three months. {family.pain} while you run it. Most firms bridge it by pushing "
+        "the work onto a controller who is already at capacity, or by paying a provider "
+        "whose partners never open the ledger. Both cost more than the seat.",
+        "I built the India property and fund accounting teams for Magnolia Capital and "
+        "29th Street Capital from scratch. The same stack this seat needs: "
+        f"{', '.join(family.stack)}.",
+        "We place a dedicated senior operator on your team for $55K to $75K. Same talent "
+        "pool the institutional shops recruit, top 0.5% CA/CPAs, paid top of market, "
+        f"embedded in your systems and your {family.cadence}. Exclusively yours, live in 10 days.",
+        "I've attached an overview of how we run this function. Can we do a call next week? "
+        "I'd bring our Head of Delivery, ex-Blackstone and Goldman Sachs, one of the first "
+        "people to move large funds' operations to India. Thirty minutes with him is useful "
+        "even if we never work together.",
+        "Harp\nFounder, X Analyst\n\n"
+        "P.S. The posting is here if I have the wrong one: https://boards.example/jobs/7",
+    ])
+    assert content["body"] == expected
+    assert content["subject"] == f"Your {role_title} hire for $55K, not $180K"
+    assert sd.find_body_violations(content["body"], content["subject"],
+                                   content["block_2"], role_title) == []
+    assert [v for v in sd.find_style_violations(content["body"])
+            if v != "question_mark"] == []
+
+
+def test_composed_body_omits_the_attachment_sentence_without_a_deck():
+    content = _compose(deck_attached=False)
+    assert "attached" not in content["body"].lower()
+    assert "Can we do a call next week?" in content["body"]
+
+
+def test_draft_email_reports_the_role_family():
+    assert _compose(role_title="CAM Analyst")["role_family"] == "lease_admin"
+    assert _compose(role_title="Widget Inspector")["role_family"] == "controller"
 
