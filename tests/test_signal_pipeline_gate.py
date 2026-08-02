@@ -122,6 +122,9 @@ def _fake_dbc(monkeypatch):
     return updates
 
 
+# run-36: a firm the gate qualifies must also show a structure signal or the
+# post-gate check parks it. These fixtures are about the geo and acquired-by
+# checks, so they carry a signal to keep the structure check out of the way.
 def _group(name="AlphaX"):
     return sp.FirmGroup(firm_name=name, firm_key=name.lower(), postings=[])
 
@@ -154,7 +157,7 @@ def test_gate_group_leaves_a_qualified_verdict_alone_when_domain_is_north_americ
         icp_gate, "research_and_gate",
         lambda firm_name, progress: icp_gate.GateResult(
             icp_result="qualified", icp_reason="AUM ~$500M, US-based, qualifies",
-            research={"domain": "kingbird.com"},
+            research={"firm_oneliner": "Multifamily investment manager, LP and GP structures", "domain": "kingbird.com"},
         ),
     )
 
@@ -213,7 +216,8 @@ def test_gate_group_alphax_regression_is_not_caught_by_the_geo_tld_backstop(monk
         icp_gate, "research_and_gate",
         lambda firm_name, progress: icp_gate.GateResult(
             icp_result="qualified", icp_reason="AUM ~$522M, US-based, qualifies",
-            research={"domain": "alphax-capital.com", "geography": "Silicon Valley / US markets"},
+            research={"firm_oneliner": "Multifamily investment manager, LP and GP structures", "domain": "alphax-capital.com",
+                     "geography": "Silicon Valley / US markets"},
         ),
     )
 
@@ -329,7 +333,7 @@ def test_gate_group_does_not_park_a_qualified_firm_that_did_the_acquiring(monkey
         icp_gate, "research_and_gate",
         lambda firm_name, progress: icp_gate.GateResult(
             icp_result="qualified", icp_reason="QUALIFIED",
-            research={"domain": "brixmor.com",
+            research={"firm_oneliner": "Multifamily investment manager, LP and GP structures", "domain": "brixmor.com",
                      "recent_event": "Acquired properties for $416.8M in 2025"},
         ),
     )

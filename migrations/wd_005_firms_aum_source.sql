@@ -1,0 +1,25 @@
+-- Workflow D — tag how a qualified firm's AUM figure was arrived at, so
+-- conversion can be compared by figure provenance later (Harpreet, run-36).
+--
+--   disclosed  the firm published the figure itself (aum_tag AUM_CONFIRMED)
+--   proxy      the gate derived or inferred it (AUM_ESTIMATED, any proxy_type,
+--              including the units/sq-ft tertiary proxy)
+--   operator   a human supplied it through /qualify
+--
+-- Precedence is operator > disclosed > proxy, and the order matters on live
+-- data: the one operator-qualified row on file is ALSO AUM_CONFIRMED, so a
+-- disclosed-first rule would mislabel it as disclosed and hide the fact that a
+-- human put the number there.
+--
+-- Nullable with no default and no backfill. Existing rows keep NULL, which
+-- reads as "decided before this was tracked" rather than asserting a
+-- provenance nobody recorded. Only rows the gate qualifies get a value.
+--
+-- Additive and idempotent, per referral-system's migrations/ pattern. Scope:
+-- wd_postings/wd_firms are Workflow D's own tables; A reads
+-- leads/companies/connections and C reads wc_*, so nothing outside Workflow D
+-- changes. The wd_ filename prefix keeps schema_migrations (shared across the
+-- three workflows in the same `outreach` database) collision-free against C's
+-- own 001_..007_ numbering.
+
+ALTER TABLE wd_firms ADD COLUMN IF NOT EXISTS aum_source TEXT;

@@ -3550,3 +3550,116 @@ Dispositions:
 Open policy question for Harp, not code: should an estimated/portfolio-value
 AUM figure qualify a firm, or is parking for operator review the intended
 behavior? Current engine parks. Jul 30 engine qualified.
+
+## ICP scope change: structure signal required, plus AUM provenance tagging - 2026-08-02
+
+Harpreet's change: the gate moves from industry label to structure signal. A
+firm that passes the vendored gate additionally needs at least one sign that it
+manages capital or property for someone else, because that is what creates the
+back-office load X Analyst staffs. A pure production homebuilder books revenue
+from selling houses: no fund to account for, no LP to report to, no third-party
+portfolio to close.
+
+Implemented as a Workflow-D post-gate check in `signal_pipeline.gate_group()`,
+the same pattern as `foreign_domain_park_reason` and
+`acquired_by_parent_park_reason`. `icp_gate.py` untouched.
+
+### Report: where each signal is detectable in the blob
+
+Read off the live rows, not assumed.
+
+| field | what it carries | populated |
+|---|---|---|
+| `firm_oneliner` | the primary carrier for every signal class | 64/83 |
+| `capital_stack` | the cleanest LP/GP carrier: the master's own example is "LP, GP, Co-GP, Preferred Equity" | 11/83 |
+| `disclosed_label` | **what the figure measures**, the discriminating field | 32/83 |
+| `proxy_basis` | how the figure was derived: "units/sq-ft tertiary proxy", "of commercial property under management" | 31/83 |
+| `recent_event` | secondary: "seeking $200M fund" (Raptor Group) | 45/83 |
+
+`disclosed_figure` is **deliberately not scanned**, and that is the whole Neal
+case. Three live blobs, all carrying a figure, only two describing capital or
+property held for others:
+
+```
+Neal      "$905 million"          label "company revenue in fiscal year 2023"
+AlphaX    "$522M"                 label "Asset Under Management"
+Wasatch   "over 3,000,000 sq ft"  label "of commercial property under management"
+```
+
+The figure alone is not a signal. Its label is. Revenue is a production metric,
+so Neal parks despite having the largest disclosed number of the three.
+
+Five signal classes, each a regex over the concatenated fields above:
+`fund_or_gp`, `limited_partners`, `third_party_capital`, `value_figure` (an
+allowlist of value-type labels: AUM, GAV, portfolio value, invested capital,
+fund size, and explicitly NOT revenue), `managed_portfolio`. The fund scan runs
+over the same text before any parking decision, so a homebuilder with a
+BTR or land-fund arm passes on the fund signal and never reaches the
+homebuilder outcome.
+
+### Validated against every firm on file
+
+Ran the detector over all 48 distinct firms. **Of the four currently qualified,
+exactly one parks: Neal Communities.** That is the intended class and the whole
+blast radius.
+
+```
+AlphaX                         third_party_capital, value_figure, managed_portfolio
+Shinda Management Corporation  value_figure, managed_portfolio
+Wasatch Commercial Management  managed_portfolio
+Neal Communities               PARKS
+```
+
+Choice NY passes on `managed_portfolio` from "Residential-focused property
+management and services in NYC metro", which is the third-party-PM case the
+rule explicitly admits.
+
+**Three regex bugs caught by validating against real data rather than fixtures:**
+
+1. `vehicle` as a bare token matched Blue Origin's "aerospace launch **vehicle**
+   manufacturer". Now requires investment/fund/capital as a qualifier.
+2. `owner/operator` matched Aston Carter's "(**not** an owner/operator)" -- the
+   phrase that was negating it. Added a negation guard that rejects a match
+   preceded within 14 characters by "not a/an", "no" or "non-".
+3. The alternation's trailing `\b` made every plural unmatchable: "joint
+   venture" could not match "joint venture**s**", because `\b` fails between
+   "venture" and "s". Caught by the homebuilder-with-a-fund-arm test. Plurals
+   are now explicit on every alternative.
+
+Chipotle still shows `fund_or_gp` from "launched $50M venture fund", which is
+correct behaviour on that text. It never reaches the check: this is a POST-gate
+check that only runs on a firm the vendored gate already qualified, and
+Chipotle is type-rejected.
+
+### AUM provenance tagging
+
+`migrations/wd_005_firms_aum_source.sql` adds `wd_firms.aum_source TEXT`,
+nullable, no backfill, so pre-existing rows read as "decided before this was
+tracked" rather than asserting a provenance nobody recorded.
+
+Precedence is **operator > disclosed > proxy**, and the order is load-bearing
+on live data: the one operator-qualified row on file is ALSO `AUM_CONFIRMED`,
+so a disclosed-first rule would mislabel it and hide the fact that a human put
+the number there. `/qualify` sets `aum_source="operator"` explicitly rather
+than relying on the reason string being parsed back out.
+
+Only qualified rows are tagged. A parked or disqualified row has no figure
+worth comparing conversion against, so it carries no provenance rather than a
+misleading one. `_reuse_cached` carries the tag forward, so a cached row stays
+comparable to the row it came from.
+
+Checked the mapping is total against the 10 qualified rows on file:
+AUM_ESTIMATED+non_floor (7) and +units (1) map to proxy, AUM_CONFIRMED with
+operator-verified (1) maps to operator, AUM_UNVERIFIED with operator-verified
+(1) maps to operator.
+
+### Ordering
+
+geo TLD, then acquired-by-parent, then structure. A firm failing more than one
+parks once, attributed to the first, and a test pins that.
+
+1006 tests pass, up from 956. 50 new in `tests/test_structure_signal.py`. Three
+existing gate tests needed a structure signal added to their fixtures: they
+build minimal blobs to test the geo and acquired-by checks, and without a
+signal the new check parked them first. That is correct new behaviour and stale
+fixtures, not a regression. No vendored `.py` file touched. No scan command run.

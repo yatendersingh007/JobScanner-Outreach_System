@@ -376,6 +376,10 @@ def _handle_qualify(arg: str) -> None:
         icp_reason=f"QUALIFIED (operator-verified AUM {human_usd(aum)})",
         aum_tag="AUM_CONFIRMED", park_reason=None, park_source=None,
         research=research,
+        # run-36: a human put this number here. Tagged explicitly rather than
+        # inferred from icp_reason, and it must outrank the AUM_CONFIRMED tag
+        # this same call sets, which would otherwise read as "disclosed".
+        aum_source="operator",
     )
     tg.send(
         f'Qualified "{row["firm_name"]}" at {human_usd(aum)}. '

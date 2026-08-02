@@ -411,6 +411,144 @@ def acquired_by_parent_park_reason(research: dict) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Structure-signal park (run-36, ICP scope change from Harpreet).
+#
+# The gate moves from INDUSTRY LABEL to STRUCTURE SIGNAL. Passing the vendored
+# gate's firm-type test is no longer sufficient: a firm additionally has to show
+# at least one sign that it manages capital or property on someone else's
+# behalf, because that is what creates the back-office load X Analyst staffs. A
+# pure production homebuilder books revenue from selling houses; it has no fund
+# to account for, no LP to report to and no third-party portfolio to close.
+#
+# WHERE EACH SIGNAL IS DETECTABLE, from reading the live blobs:
+#
+#   firm_oneliner    the primary carrier. "Residential-focused property
+#                    management and services" (Choice NY), "Builder-developer
+#                    and vertically integrated real estate investment and asset
+#                    manager" (AlphaX), "Homebuilder, single-family and townhome
+#                    development" (Neal).
+#   capital_stack    the cleanest LP/GP carrier when populated: the master's own
+#                    example is "LP, GP, Co-GP, Preferred Equity". Populated on
+#                    11 of 83 rows, so it confirms but cannot be relied on.
+#   disclosed_label  what the figure MEASURES, and the discriminating field.
+#   proxy_basis      how the figure was derived, e.g. "units/sq-ft tertiary
+#                    proxy", "of commercial property under management".
+#   recent_event     secondary, e.g. "seeking $200M fund" (Raptor Group).
+#
+# THE FIGURE ALONE IS NOT A SIGNAL, ITS LABEL IS. This is the whole Neal case
+# and the reason the check reads labels rather than checking for a number:
+#
+#   Neal      "$905 million"      label "company revenue in fiscal year 2023"
+#   AlphaX    "$522M"             label "Asset Under Management"
+#   Wasatch   "over 3,000,000 sq ft"  label "of commercial property under management"
+#
+# All three have a disclosed_figure. Only two of them describe capital or
+# property held for others. Revenue is a production metric, so Neal parks.
+#
+# Homebuilders with a BTR or land-fund arm pass on the fund signal, which is
+# why the fund scan runs over the same text before any parking decision rather
+# than after a homebuilder classification.
+# ---------------------------------------------------------------------------
+_STRUCTURE_TEXT_FIELDS = ("firm_oneliner", "capital_stack", "disclosed_label",
+                          "proxy_basis", "recent_event")
+
+_STRUCTURE_SIGNALS: tuple = (
+    # Plurals are explicit on every alternative. The group ends with \b, so a
+    # bare "joint venture" cannot match "joint ventures" -- \b fails between
+    # "venture" and "s". Caught by the homebuilder-with-a-fund-arm test.
+    ("fund_or_gp", re.compile(
+        r"\b(funds?|fund\s+i{1,3}\b|land\s+funds?|btr\s+funds?|build[\s-]to[\s-]rent"
+        r"|general\s+partners?|co[\s-]?gp|\bgp\b|sponsors?|syndicat\w*"
+        r"|joint\s+ventures?|\bjv\b|opportunity\s+zones?|closed[\s-]end|open[\s-]end"
+        # "vehicle" must be qualified. A bare token matched Blue Origin's
+        # "aerospace launch vehicle manufacturer", caught in validation.
+        r"|(?:investment|fund|capital)\s+vehicles?|programmatic\s+equity)\b",
+        re.IGNORECASE)),
+    ("limited_partners", re.compile(
+        r"\b(limited\s+partners?|\blps?\b|institutional\s+investors?|investor\s+capital"
+        r"|preferred\s+equity|capital\s+partners?)\b", re.IGNORECASE)),
+    ("third_party_capital", re.compile(
+        r"\b(asset\s+manager|asset\s+management|investment\s+manager"
+        r"|investment\s+management|manages?\s+capital|discretionary\s+capital"
+        r"|on\s+behalf\s+of\s+(?:investors?|clients?|owners?)|fiduciary"
+        r"|assets?\s+under\s+management|\baum\b)\b", re.IGNORECASE)),
+    ("value_figure", re.compile(
+        r"\b(assets?\s+under\s+management|\baum\b|gross\s+asset\s+value|\bgav\b"
+        r"|portfolio\s+value|assets?\s+valued|invested\s+capital|deployed\s+capital"
+        r"|fund\s+size|fund\s+target|capital\s+raised)\b", re.IGNORECASE)),
+    ("managed_portfolio", re.compile(
+        r"\b(property\s+manage\w*|under\s+management|managed\s+portfolio"
+        r"|third[\s-]party\s+(?:manager|management|operator)"
+        r"|owner[\s/-]operator|operates?\s+and\s+manages?|manages?\s+and\s+operates?"
+        r"|manages?\s+over|servic\w+\s+for\s+owners)\b", re.IGNORECASE)),
+)
+
+
+def _structure_text(research: dict) -> str:
+    return " || ".join(str((research or {}).get(f) or "") for f in _STRUCTURE_TEXT_FIELDS)
+
+
+# A one-liner that DENIES the structure is not evidence of it. Live case caught
+# in validation: Aston Carter's "staffing and recruitment firm providing talent
+# solutions (not an owner/operator)" matched managed_portfolio on the very
+# phrase that was negating it.
+_NEGATION_RE = re.compile(r"(?:\bnot\s+(?:an?\s+)?|\bno\s+|\bnon[\s-]?)$", re.IGNORECASE)
+_NEGATION_WINDOW = 14
+
+
+def _is_negated(text: str, start: int) -> bool:
+    return bool(_NEGATION_RE.search(text[max(0, start - _NEGATION_WINDOW):start]))
+
+
+def structure_signals(research: dict) -> list:
+    """Every structure signal present in the blob, by name. Empty means the
+    firm shows no sign of managing capital or property for anyone else.
+
+    A match immediately preceded by a negation does not count."""
+    text = _structure_text(research)
+    if not text.strip(" |"):
+        return []
+    found = []
+    for name, rx in _STRUCTURE_SIGNALS:
+        if any(not _is_negated(text, m.start()) for m in rx.finditer(text)):
+            found.append(name)
+    return found
+
+
+def no_structure_signal_park_reason(research: dict) -> Optional[str]:
+    """None if the firm shows at least one structure signal, else a park
+    reason. Applied only to a firm the vendored gate already qualified."""
+    if structure_signals(research):
+        return None
+    oneliner = str((research or {}).get("firm_oneliner") or "").strip()
+    detail = f' Self-description: "{oneliner}".' if oneliner else ""
+    return ("no structure signal in the research: no fund or GP language, no LP "
+            "reference, no third-party capital management, no AUM or portfolio-value "
+            f"figure, and no managed property portfolio.{detail}")
+
+
+# ---------------------------------------------------------------------------
+# AUM provenance tag (run-36). operator > disclosed > proxy, and that order is
+# load-bearing: the one operator-qualified row on file is also AUM_CONFIRMED.
+# ---------------------------------------------------------------------------
+_OPERATOR_VERIFIED_RE = re.compile(r"operator-verified", re.IGNORECASE)
+
+
+def aum_source_for(research: dict, icp_reason: str = "") -> Optional[str]:
+    """"operator" | "disclosed" | "proxy" | None."""
+    if _OPERATOR_VERIFIED_RE.search(icp_reason or ""):
+        return "operator"
+    research = research or {}
+    tag = str(research.get("aum_tag") or "").upper()
+    proxy = str(research.get("proxy_type") or "").strip()
+    if tag == "AUM_CONFIRMED":
+        return "disclosed"
+    if tag == "AUM_ESTIMATED" or proxy:
+        return "proxy"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Gate
 # ---------------------------------------------------------------------------
 def gate_group(run_id: int, group: FirmGroup, progress: Progress,
@@ -475,12 +613,24 @@ def gate_group(run_id: int, group: FirmGroup, progress: Progress,
             progress(f"{group.firm_name}: {acquired_reason}. Parked despite the gate qualifying it.")
             icp_status, icp_reason = "parked", acquired_reason
             park_reason, park_source = acquired_reason, "acquired_by_parent"
+    if icp_status == "qualified":
+        structure_reason = no_structure_signal_park_reason(res.research)
+        if structure_reason:
+            progress(f"{group.firm_name}: {structure_reason} Parked despite the gate "
+                     "qualifying it.")
+            icp_status, icp_reason = "parked", structure_reason
+            park_reason, park_source = structure_reason, "no_structure_signal"
+
+    # Only a firm that survived every check gets a provenance tag; a parked or
+    # disqualified row has no figure worth comparing conversion against.
+    aum_source = aum_source_for(res.research, icp_reason) if icp_status == "qualified" else None
 
     dbc.update_wd_firm(
         firm["id"],
         icp_status=icp_status,
         icp_reason=icp_reason,
         aum_tag=res.aum_tag,
+        aum_source=aum_source,
         park_reason=park_reason,
         park_source=park_source,
         confidence=res.confidence,
@@ -542,6 +692,10 @@ def _reuse_cached(run_id: int, group: FirmGroup, cached: dict) -> dict:
         verdict_source=cached["src"],
         verdict_cached_from=cached["id"],
         gated_at=cached["decided_at"],
+        # run-36: provenance travels with the reused verdict, so a cached row
+        # is comparable to the row it came from rather than silently untagged.
+        aum_source=(aum_source_for(cached.get("research"), cached.get("icp_reason") or "")
+                    if cached["icp_status"] == "qualified" else None),
     )
     dbc.insert_postings(run_id, firm["id"], [_posting_row(p) for p in group.postings])
     return firm
