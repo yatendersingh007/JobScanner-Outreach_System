@@ -176,3 +176,14 @@ check, not a documented switch. If lib_referral/deck_filler.py changes how it
 gates that retry, fabrication silently returns. Re-verify after any deck_filler
 re-vendor: a firm with no fund structures must show an omitted row, not an
 invented paragraph.
+
+## Donor filing: proxy-AUM extraction (icp_gate.py) - 2026-08-01
+
+Harpreet decision: portfolio value, GAV, and "manages $X" phrasings count as
+AUM proxies for qualification. Current vendored engine (post-Jul-30 behavior)
+returns aum_display/aum_estimated EMPTY where the Jul 30 engine extracted
+"$250 million (assets valued)" from identical firms (Choice NY, wd_firms 66 vs
+137). Request against donor icp_gate.py: restore/accept proxy-figure
+extraction, emitting aum_estimated=true and the display string. Workflow D
+already tags aum_source proxy|disclosed|operator (commit 91696e2) so proxy
+conversion is measurable once the donor fix lands.
