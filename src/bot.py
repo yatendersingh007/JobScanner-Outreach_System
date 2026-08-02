@@ -492,14 +492,26 @@ def _handle_status() -> None:
 
 
 def _help_text() -> str:
+    # `/scan "Firm"` and `/scan "Firm" fresh` are deliberately NOT listed, and
+    # are deliberately still wired: _dispatch routes them, parse_scan_args
+    # parses them, run_single_firm runs them. They are undocumented, not
+    # removed.
+    #
+    # Why hidden: single-firm mode skips the scanner, so the firm has no
+    # posting, and the v2 email template is posting-anchored -- its opening
+    # line names the role and its P.S. links the posting. The required-fact
+    # check refuses to ship an email making both claims with nothing behind
+    # them, which is correct and stays. So the command can gate a firm, find
+    # its POC and build its deck, but it can never produce a draft, and an
+    # operator reading "/scan "Firm"" in the help reasonably expects one.
+    # Listing a command whose advertised end state is unreachable generates
+    # confusion, not use. Anyone who needs it already knows it exists.
     return (
         "Workflow D bot.\n\n"
         "/scan                  - full run: scan, gate, draft, Gmail drafts.\n"
         "/scan dry              - stop after gating. No Apollo calls, no drafts. "
         "The opt-out, not the default.\n"
         f"/scan days N           - catch-up window after a gap (1-{config.MAX_SCAN_DAYS}).\n"
-        '/scan "Firm"           - single-firm override, skips the scanner entirely.\n'
-        '/scan "Firm" fresh     - same, but re-gate instead of reusing a cached verdict\n'
         "/status                - last run's buckets, spend, queue depth.\n"
         '/qualify "Firm" <AUM>  - rescue a parked firm, e.g. /qualify "Acme" 800M\n'
         '/disqualify "Firm"     - reject a parked firm\n'

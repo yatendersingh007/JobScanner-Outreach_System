@@ -3663,3 +3663,84 @@ existing gate tests needed a structure signal added to their fixtures: they
 build minimal blobs to test the geo and acquired-by checks, and without a
 signal the new check parked them first. That is correct new behaviour and stale
 fixtures, not a regression. No vendored `.py` file touched. No scan command run.
+
+## Single-firm mode: hidden from /help, honest when it cannot draft - 2026-08-02
+
+Two changes to the same fact. `/scan "Firm"` skips the scanner, so the firm has
+no posting, and the v2 email template is posting-anchored: its opening names the
+role and its P.S. links the posting. The required-fact check refuses to ship an
+email asserting both with nothing behind them. So the command can gate a firm,
+find its POC and build its deck, but it can never produce a draft.
+
+### What the operator actually saw
+
+Reproduced print-only before touching anything, and it was worse than reported:
+
+```
+draft_email(posting_title="", posting_url="", ...) raises
+  ValueError: Choice NY Property Management LLC: required-fact check failed:
+              missing_role_title_in_opening, posting_title_not_grounded,
+              missing_posting_url_in_signoff
+```
+
+Nothing catches it in `_draft_one_firm`, `draft_for_run` or `_run_drafting`, so
+it lands on bot.py's `except ValueError` at line 237, which sends
+`Could not start: <that text>` and **returns before `summarize()`**. Two
+separate defects in one message. "Could not start" is false: the run started,
+gated, spent six Tavily searches, resolved a POC and rendered a deck. And the
+early return took the verdict, the POC and the spend down with the email, so
+the operator got a violation list and nothing else.
+
+Confirmed the postings signature on live rows. Firms 139 and 84 came from
+single-firm runs and have 0 postings; every batch-gated firm has at least one.
+
+### The message
+
+Reported as an outcome at the point of decision, and the run finishes normally:
+
+> Qualified, POC resolved, deck generated. No email drafted because single-firm
+> mode has no job posting to anchor the v2 template. The draft fires
+> automatically when a posting for this firm appears in a scan.
+
+Two deliberate departures from the copy as dictated. The em dash after "deck
+generated" is a sentence break, per CLAUDE.md's style rule, which covers
+Telegram messages. And "deck generated" becomes "deck generation failed" when
+`_generate_deck` returned nothing: the sentence asserts three things happened,
+and HARD RULE 5 says an honest report beats a comfortable one.
+
+Its own bucket, `no_posting`, not `no_email`. The POC WAS resolved and the deck
+WAS built; filing this under a failure heading would misreport both. Wired
+through `DraftBatchResult`, `RunResult`, `_run_drafting` and `summarize`.
+
+**The required-fact check is untouched.** This is a caller-side early return
+that happens before it, not a relaxation of it. Two tests pin that: the
+violation list is still produced for an empty title and URL, and `draft_email`
+still raises for anything that reaches it without a posting.
+
+Keyed on "no postings at all", which is the single-firm signature exactly: a
+batch firm is grouped FROM its postings, so it always has one. A batch posting
+missing only its URL is a different thing, real drift between the posting
+record and the draft, and still raises loudly. A test pins that too, because
+keying this branch on `not posting_url` instead would have reported a genuine
+defect as an expected outcome.
+
+Placed after POC resolution and deck generation rather than before. It costs an
+Apollo call and a deck render that produce no email, and that is the right
+trade: a single-firm run is usually asking "does this firm qualify and who do we
+talk to", so the POC and the deck are the useful output, not waste. It is also
+the only placement under which the message can honestly claim they happened.
+
+### Why the commands are hidden rather than removed
+
+`/scan "Firm"` and `/scan "Firm" fresh` are gone from `/help` and still fully
+wired: `_dispatch` routes them, `parse_scan_args` parses them, `run_single_firm`
+runs them. A comment above the help string says why, so the next person to read
+the list does not "fix" the omission. Listing a command whose advertised end
+state is unreachable generates confusion, not use. Anyone who needs it knows.
+
+Three tests guard the distinction: both lines absent, every other command still
+present (the lines were removed by hand, nothing adjacent went with them), and
+the commands still reaching `run_single_firm` through the real router.
+
+1027 tests pass, up from 1006. 21 new in `tests/test_single_firm_no_posting.py`.
+No vendored file touched. No scan command run.

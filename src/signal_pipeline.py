@@ -120,6 +120,9 @@ class RunResult:
     duplicate_within_run: list = field(default_factory=list)
     # Contact resolved to a domain that is not the firm the gate researched.
     poc_domain_mismatch: list = field(default_factory=list)
+    # Single-firm runs: gated and POC-resolved, but no posting exists to
+    # anchor the v2 template, so no email. Not a failure bucket.
+    no_posting: list = field(default_factory=list)
     # HARD RULE 4: per-run aggregate fact-grounding/fallback counts, reset at
     # the start of every draft_for_run() call and reported here.
     fallback_counts: dict = field(default_factory=dict)

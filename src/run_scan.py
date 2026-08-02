@@ -89,6 +89,7 @@ def _run_drafting(result, progress) -> None:
     result.no_email = draft_result.no_email
     result.duplicate_within_run = draft_result.duplicate_within_run
     result.poc_domain_mismatch = draft_result.poc_domain_mismatch
+    result.no_posting = draft_result.no_posting
     result.fallback_counts = draft_result.fallback_counts
     if draft_result.cancelled:
         result.cancelled = True
@@ -185,6 +186,12 @@ def summarize(r, dry_hint: str = "--dry") -> str:
             lines += [f"POC DOMAIN MISMATCH, not drafted {len(r.poc_domain_mismatch)}"]
             lines += [f"  {f['firm_name']}: {f.get('poc_domain_mismatch_reason', 'domain mismatch')}"
                       for f in r.poc_domain_mismatch]
+        # Not a failure heading. The gate ran, the POC resolved and the deck
+        # exists; only the email is missing, and the reason says why.
+        if r.no_posting:
+            lines += [f"NO POSTING TO DRAFT AGAINST {len(r.no_posting)}"]
+            lines += [f"  {f['firm_name']}: {f.get('no_posting_reason', 'no posting')}"
+                      for f in r.no_posting]
         if r.fallback_counts:
             lines += ["", "Fallback telemetry (HARD RULE 4): " +
                       ", ".join(f"{reason}={count}" for reason, count in sorted(r.fallback_counts.items()))]

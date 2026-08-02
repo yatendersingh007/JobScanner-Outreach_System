@@ -1084,6 +1084,7 @@ class DraftBatchResult:
     no_email: list = field(default_factory=list)
     duplicate_within_run: list = field(default_factory=list)
     poc_domain_mismatch: list = field(default_factory=list)
+    no_posting: list = field(default_factory=list)
     cancelled: bool = False
     fallback_counts: dict = field(default_factory=dict)
 
@@ -2143,6 +2144,33 @@ def _draft_one_firm(firm: dict, contacted_this_run: set[str], progress: Progress
         firm_name, research, progress,
         category=firm.get("category") or "", subcategory=firm.get("subcategory") or "",
         icp_reason=firm.get("icp_reason") or "")
+    # Single-firm mode (/scan "Firm") gates a firm the scanner never surfaced,
+    # so group.postings is empty, insert_postings() writes nothing, and there
+    # is no posting to anchor the v2 template on. draft_email() below WILL
+    # raise here, and it is right to: the opening line names a role and the
+    # P.S. links a posting, and neither exists. But the raw violation list
+    # ("required-fact check failed: missing_role_title_in_opening, ...") reads
+    # as a crash, and bot.py turns a ValueError into "Could not start: ..."
+    # and returns BEFORE summarize() -- so the operator loses the verdict, the
+    # POC and the spend along with the email. Report it as an outcome instead
+    # and let the run finish.
+    #
+    # Keyed on "no postings at all", which is the single-firm signature
+    # exactly: a batch firm is grouped FROM its postings, so it always has at
+    # least one. A batch posting missing only a URL is a different problem --
+    # real drift between the posting record and the draft -- and still raises,
+    # loudly, which is what that check is for. find_required_fact_violations()
+    # is untouched; this returns before it runs, it does not relax it.
+    if not postings:
+        deck_note = "deck generated" if deck_pdf_path else "deck generation failed"
+        reason = (f"Qualified, POC resolved, {deck_note}. No email drafted because "
+                  "single-firm mode has no job posting to anchor the v2 template. "
+                  "The draft fires automatically when a posting for this firm "
+                  "appears in a scan.")
+        progress(f"{firm_name}: {reason}")
+        return "no_posting", {**firm, "no_posting_reason": reason, "poc_name": poc_name,
+                              "poc_email": email, "deck_pdf_path": deck_pdf_path}
+
     poc_first_name = poc_name.split()[0] if poc_name else "there"
     email_content = draft_email(
         firm_name=firm_name, poc_first_name=poc_first_name, poc_email=email,
