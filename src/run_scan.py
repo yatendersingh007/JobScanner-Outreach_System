@@ -95,6 +95,14 @@ def _run_drafting(result, progress) -> None:
         result.cancelled = True
 
 
+def _cam(firm: dict) -> str:
+    """[CAM] on every verdict line, not just the qualified ones (run 39). A
+    PARKED firm whose postings describe CAM reconciliation is exactly the one
+    worth a second look before /disqualify, so the marker has to be visible
+    where that decision gets made."""
+    return "[CAM] " if firm.get("cam_flag") else ""
+
+
 def summarize(r, dry_hint: str = "--dry") -> str:
     """`dry_hint` is the exact flag text to show the operator for whichever
     front door is calling: "--dry" for the CLI, "/scan dry" for the bot.
@@ -115,15 +123,15 @@ def summarize(r, dry_hint: str = "--dry") -> str:
         f"QUALIFIED {len(r.qualified)}",
     ]
     for f in r.qualified:
-        lines.append(f"  {f['firm_name']}, {f['posting_count']} open "
+        lines.append(f"  {_cam(f)}{f['firm_name']}, {f['posting_count']} open "
                      f"({f.get('aum_tag') or 'no AUM tag'}, {f.get('verdict_source')})")
     lines.append(f"PARKED {len(r.parked)}")
     for f in r.parked:
-        lines.append(f"  {f['firm_name']}, {f.get('park_reason') or f.get('icp_reason')} "
+        lines.append(f"  {_cam(f)}{f['firm_name']}, {f.get('park_reason') or f.get('icp_reason')} "
                      f"[{f.get('park_source')}]  /qualify or /disqualify")
     lines.append(f"DISQUALIFIED {len(r.disqualified)}")
     for f in r.disqualified:
-        lines.append(f"  {f['firm_name']}, {f.get('icp_reason')}")
+        lines.append(f"  {_cam(f)}{f['firm_name']}, {f.get('icp_reason')}")
 
     if r.deferred:
         lines += ["", f"OVER CAP {len(r.deferred)} not gated today "

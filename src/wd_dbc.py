@@ -405,7 +405,7 @@ def insert_postings(run_id: int, firm_id: Optional[int], rows: list[dict]) -> in
     cols = ["run_id", "firm_id", "company", "title", "url", "source", "dedup_key",
             "category", "subcategory", "region", "location", "posted_date",
             "first_seen", "days_since_posted", "match_reason",
-            "poc_name_hint", "poc_designation_hint", "description"]
+            "poc_name_hint", "poc_designation_hint", "description", "cam_flag"]
     placeholders = ", ".join(["%s"] * len(cols))
     values = [
         [run_id, firm_id] + [r.get(c) for c in cols[2:]]

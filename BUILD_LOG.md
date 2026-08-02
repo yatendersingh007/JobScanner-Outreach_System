@@ -3744,3 +3744,120 @@ the commands still reaching `run_single_firm` through the real router.
 
 1027 tests pass, up from 1006. 21 new in `tests/test_single_firm_no_posting.py`.
 No vendored file touched. No scan command run.
+
+## Run-39 scope: US-only JSearch, tax context, CAM by description - 2026-08-02
+
+Four changes from the run-39 audit. Three narrow or widen the scanner's reach;
+the fourth records a signal the third one stopped hunting by title.
+
+### 1. JSearch: US only, 28 queries
+
+Canada dropped. Zero qualified firms across every run on record, and the
+JSearch quota is per-request: each country multiplies the whole query list.
+Full role coverage of one market beats partial coverage of two.
+
+Eight queries added with the freed quota: real estate controller, fund
+controller, portfolio accountant, lease analyst, acquisitions analyst, asset
+management analyst, investor reporting analyst, property bookkeeper.
+
+Parity check on all 28 against the compiled title_patterns, because a query
+with no matching pattern spends quota on postings the filter then drops. Three
+patterns were needed, one more than expected:
+
+- `bookkeep(er|ing)`, bare. A title word, not a firm word, so no collision.
+- `investor\s+reporting(...)`. **Not flagged in the brief.** The brief listed
+  real estate controller and bookkeeper as the likely gaps; investor reporting
+  analyst had nothing either. `investor relations` and `financial reporting`
+  both exist and neither matches it. Added in the `investor relations` style.
+- `(property|fund)\s+controller` -> `(property|real\s*estate|fund)\s+controller`.
+  Strictly speaking redundant, since the bare `\bcontroller\b` pattern already
+  took "Real Estate Controller", but explicit beats incidental.
+
+Two queries end up with no pattern matching their own phrase, both deliberate,
+both named in a set the test asserts against so a third cannot appear quietly:
+`accounts receivable` (pre-existing; the pattern wants a role noun after it)
+and `tax accountant` (caused by change 2, and its whole point). Both still
+admit real titles, which is what makes the exemption defensible, and a test
+pins that too.
+
+### 2. Tax needs an asset class
+
+`tax\s+(analyst|associate|manager|accountant)` took "Tax Accountant - In-Store
+(QUEENS)" and "CPA / Tax Accountant (US Individual Tax 1040)" in run 39. Now
+two patterns, both directions, because the qualifier can lead ("Real Estate Tax
+Manager") or trail ("Tax Manager - Construction & Real Estate", run 39's
+legitimate hit). Role words unchanged; only the context requirement is new.
+All three live titles are tested verbatim.
+
+The cost is bare "Tax Analyst" and "Senior Tax Accountant", which now drop.
+That is the intended trade and it is pinned by its own test rather than left
+implicit.
+
+One thing recorded and NOT fixed: "Tax Senior Associate, Real Estate
+Partnerships" does not match, because the role words sit adjacent to "tax". The
+bare pattern this replaced missed it identically, so it is pre-existing, not a
+cost of tightening. Widening the role list is a separate decision.
+
+### 3. CAM Analyst is not a title
+
+Target and `cam\s+analyst` pattern both dropped. 890+ CAM-reconciliation
+postings ship as Property Accountant, Senior Accountant, Real Estate
+Controller. The target burned 5-8 min a run hunting a title nobody posts.
+Tests assert those three real titles still match, since dropping the target
+only costs coverage if they don't.
+
+The `cam` alternative inside the first accounting pattern stays: "CAM
+Accountant" is real. role_families keeps its own "cam analyst" title too; the
+two tables are independent and that one is harmless.
+
+### 4. CAM by description
+
+`wd_006_postings_cam_flag.sql` adds `wd_postings.cam_flag BOOLEAN`, nullable,
+no backfill. FALSE means "read the description, no CAM language"; NULL means
+"never evaluated", which is the honest reading of every row written before
+wd_004 persisted descriptions at all. Post-classification only: it records and
+surfaces, never keeps or drops a posting, and does not touch draft
+composition. A test asserts `cam_flag` appears nowhere in signal_drafting.py,
+so that boundary fails loudly if someone crosses it later.
+
+**The window came from live data, not from a guess.** The first cut required
+CAM within 30 characters of "reconcil", and it flagged nothing at all across
+the 18 descriptions on file. One of them, Colliers' Senior Lease Administrator,
+is exactly the target case:
+
+> "Assist in the review of the tenant rent, CAM, operating expense, tax, or
+> insurance reimbursement reconciliation as required."
+
+CAM sits inside a list of recovery categories and "reconciliation" closes the
+list 53 characters later. Widened to 80, bidirectional ("reconciliation of CAM
+charges" is equally common), DOTALL for bulleted descriptions. 120 finds
+nothing more in the corpus, so 80 is the live case plus headroom. Recall is the
+right bias: a false marker changes no verdict and no draft, a false negative
+loses the flagship pain signal. Verified clean against "camera"/"Cameron",
+plain bank reconciliations, and generic account reconciliations.
+
+Result on the live corpus: 1 of 18 flagged, the Colliers row, correctly.
+
+`[CAM]` marks the firm on **every** verdict line, not just qualified. A parked
+firm whose postings describe CAM reconciliation is exactly the one worth a
+second look before /disqualify, so the marker has to be where that decision
+gets made.
+
+Derived in memory from the group in every path but one. A resume re-gates in
+place from a FirmGroup rebuilt out of wd_queue, and that group carries no
+postings, so that path alone reads the rows back from wd_postings rather than
+report a silent False on every resumed firm. Everywhere else the group is
+authoritative, because the rows were just inserted from it, and a query would
+be waste. Round-tripped against real Postgres, then the scratch rows removed.
+
+### Stale tests
+
+Four failed on the config change and were updated, not worked around: the
+scanner's title-kept list (CAM Analyst -> CAM Accountant), role_families'
+query-count and stability pins (20 -> 28, with the three new default-family
+landings marked as such rather than hidden), and two wd_dbc column-order
+assertions that indexed the last column positionally and now pair columns with
+values by name, so the next appended column cannot break them the same way.
+
+1108 tests pass, up from 1027. 81 new in `tests/test_run39_scope.py`. No
+vendored `.py` touched. No scan command run.

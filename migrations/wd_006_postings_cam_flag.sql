@@ -1,0 +1,21 @@
+-- Workflow D — mark a posting whose DESCRIPTION describes CAM reconciliation
+-- work, regardless of what the title calls the role (run 39).
+--
+-- The run-39 audit killed the "CAM Analyst" title pattern and its TinyFish
+-- target: the market does not use that title. 890+ CAM-reconciliation postings
+-- carry titles like Property Accountant, Senior Accountant, Real Estate
+-- Controller. So the signal is in the body, not the title, and it is worth
+-- recording: CAM reconciliation is X Analyst's flagship pain.
+--
+-- Nullable with no default and no backfill, same reasoning as wd_005. FALSE
+-- means "the description was read and had no CAM language"; NULL means "not
+-- evaluated", which is the honest reading of every row written before
+-- wd_004_postings_description.sql, when no description was persisted at all.
+-- A default of FALSE would assert a check that never ran on those rows.
+--
+-- Additive and idempotent. Scope: wd_postings is Workflow D's own table, so
+-- nothing outside Workflow D changes. The wd_ filename prefix keeps
+-- schema_migrations (shared across A/C/D in the same `outreach` database)
+-- collision-free against C's own 001_..007_ numbering.
+
+ALTER TABLE wd_postings ADD COLUMN IF NOT EXISTS cam_flag BOOLEAN;

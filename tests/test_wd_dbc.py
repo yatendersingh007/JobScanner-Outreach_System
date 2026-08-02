@@ -488,6 +488,7 @@ def _posting_dict(**over):
         "posted_date": None, "first_seen": None, "days_since_posted": 0,
         "match_reason": "test", "poc_name_hint": None, "poc_designation_hint": None,
         "description": _JSEARCH_DESCRIPTION,
+        "cam_flag": False,
     }
     row.update(over)
     return row
@@ -513,16 +514,18 @@ def test_insert_postings_sends_the_description_value(captured_insert):
 
 def test_insert_postings_column_order_matches_the_value_order(captured_insert):
     """A column list and a value list built separately can drift. This pins
-    them together: description must be the LAST of both."""
-    wd_dbc.insert_postings(7, 3, [_posting_dict()])
+    them together at both ends and pairs every column with its own value, so
+    appending a column (cam_flag, run 39) cannot silently shift the rest."""
+    wd_dbc.insert_postings(7, 3, [_posting_dict(cam_flag=True)])
 
     sql = captured_insert["sql"]
     columns = sql[sql.index("(") + 1:sql.index(")")].split(", ")
     values = captured_insert["values"][0]
 
     assert len(columns) == len(values)
-    assert columns[-1] == "description"
-    assert values[-1] == _JSEARCH_DESCRIPTION
+    assert columns[-1] == "cam_flag"
+    assert values[-1] is True
+    assert dict(zip(columns, values))["description"] == _JSEARCH_DESCRIPTION
     assert columns[0] == "run_id" and values[0] == 7
     assert columns[1] == "firm_id" and values[1] == 3
 
@@ -534,7 +537,10 @@ def test_insert_postings_sends_none_when_a_posting_has_no_description(captured_i
     del row["description"]
     wd_dbc.insert_postings(7, 3, [row])
 
-    assert captured_insert["values"][0][-1] is None
+    sql = captured_insert["sql"]
+    columns = sql[sql.index("(") + 1:sql.index(")")].split(", ")
+    # By name, not by position: cam_flag is the last column since run 39.
+    assert dict(zip(columns, captured_insert["values"][0]))["description"] is None
 
 
 def test_postings_for_firm_returns_the_description(monkeypatch):

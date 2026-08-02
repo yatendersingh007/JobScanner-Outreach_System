@@ -58,7 +58,11 @@ def _keep(title, cfg, gates):
     "Family Office Accountant",
     "Lease Administrator",
     "Lease Analyst",
-    "CAM Analyst",
+    # "CAM Analyst" was here until run 39. The market does not use that title
+    # (890+ CAM-reconciliation postings ship as Property Accountant, Senior
+    # Accountant, Real Estate Controller), so the pattern and its TinyFish
+    # target were dropped. "CAM Accountant" below is the title that is real.
+    "CAM Accountant",
     "Joint Venture Accountant",
     "Construction Accountant",
     "Development Accountant",

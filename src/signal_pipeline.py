@@ -82,6 +82,12 @@ class FirmGroup:
     def subcategory(self) -> str:
         return next((p.subcategory for p in self.postings if p.subcategory), "")
 
+    @property
+    def cam_flag(self) -> bool:
+        """True when ANY posting in the group describes CAM work. One flagged
+        posting is enough: the firm has the pain."""
+        return any(cam_signals(getattr(p, "description", "") or "") for p in self.postings)
+
 
 @dataclass
 class RunResult:
@@ -142,6 +148,66 @@ _WS_RE = re.compile(r"\s+")
 
 def _norm_title(title: str) -> str:
     return _WS_RE.sub(" ", (title or "").strip().lower())
+
+
+# ---------------------------------------------------------------------------
+# CAM description flag (run 39).
+#
+# The run-39 audit killed the "CAM Analyst" title pattern and its TinyFish
+# target: 890+ CAM-reconciliation postings carry titles like Property
+# Accountant, Senior Accountant and Real Estate Controller. "CAM Analyst" is
+# not a title the market uses, so hunting it by title found nothing and cost
+# 5-8 minutes a run.
+#
+# The work is still worth finding, because CAM reconciliation is X Analyst's
+# flagship pain. It just lives in the description, which wd_004 now persists
+# for JSearch postings. This is a POST-classification marker: it records and
+# surfaces, it never keeps or drops a posting, and it does not touch draft
+# composition. The drafting layer can read wd_postings.cam_flag later.
+#
+# TinyFish guest-search postings have no description, so they can never be
+# flagged. A False here means "read the description, no CAM language", not
+# "this firm has no CAM work" -- absence of the flag proves nothing.
+# ---------------------------------------------------------------------------
+# Proximity, both directions, DOTALL, because of how these postings are
+# actually written. Calibrated on the one live description that carries the
+# work, Colliers' Senior Lease Administrator:
+#
+#   "Assist in the review of the tenant rent, CAM, operating expense, tax, or
+#    insurance reimbursement reconciliation as required."
+#
+# CAM sits inside a list of recovery categories and "reconciliation" closes
+# the list, 53 characters later. A 30-character window read that as no match.
+# Both orders occur too ("reconciliation of CAM charges"), and bullets put the
+# two tokens on different lines. 80 characters covers the live case with
+# headroom; 120 finds nothing more in the corpus on file.
+#
+# Recall is the right bias here. A false [CAM] is a marker on a summary line
+# that changes no verdict and no draft; a false negative loses the flagship
+# pain signal entirely. \b keeps "cam" off "camera" and "Cameron", and inside
+# a finance job description a standalone "CAM" token is common area
+# maintenance essentially always.
+_CAM_NEAR = 80
+_CAM_SIGNALS: tuple = (
+    ("cam_reconciliation", re.compile(
+        rf"\bcam\b.{{0,{_CAM_NEAR}}}?reconcil\w*|reconcil\w*.{{0,{_CAM_NEAR}}}?\bcam\b",
+        re.IGNORECASE | re.DOTALL)),
+    ("common_area_maintenance", re.compile(r"common\s+area\s+maintenance", re.IGNORECASE)),
+    ("nnn_reconciliation", re.compile(
+        rf"\bnnn\b.{{0,{_CAM_NEAR}}}?reconcil\w*|reconcil\w*.{{0,{_CAM_NEAR}}}?\bnnn\b",
+        re.IGNORECASE | re.DOTALL)),
+    ("opex_recoveries", re.compile(r"operating\s+expense\w*\s+recover\w*",
+                                   re.IGNORECASE | re.DOTALL)),
+)
+
+
+def cam_signals(description: str) -> list:
+    """Which CAM phrases the posting description carries. Named rather than
+    boolean so a flagged posting can say why."""
+    text = description or ""
+    if not text.strip():
+        return []
+    return [name for name, rx in _CAM_SIGNALS if rx.search(text)]
 
 
 # ---------------------------------------------------------------------------
@@ -643,6 +709,8 @@ def gate_group(run_id: int, group: FirmGroup, progress: Progress,
         gated_at=_now(),
     )
     row = dbc.get_wd_firm(firm["id"])
+    row["cam_flag"] = (_cam_flag_from_db(firm["id"]) if existing_firm is not None
+                       else group.cam_flag)
     row["_search_calls"] = res.search_calls
     row["_tokens_used"] = res.tokens_used
     row["_research_cost_usd"] = res.research_cost_usd
@@ -652,6 +720,16 @@ def gate_group(run_id: int, group: FirmGroup, progress: Progress,
 def _now():
     from datetime import datetime, timezone
     return datetime.now(timezone.utc)
+
+
+def _cam_flag_from_db(firm_id: int) -> bool:
+    """Only for the resume path. A resume re-gates in place from a FirmGroup
+    rebuilt out of wd_queue, and that group carries no postings (see
+    gate_group's docstring), so reading the group would report a silent False
+    on every resumed firm. Its rows are already in wd_postings under this
+    firm_id. Every other path just inserted the rows from the same group it is
+    holding, so the group is authoritative there and no query is needed."""
+    return any(bool(p.get("cam_flag")) for p in dbc.postings_for_firm(firm_id))
 
 
 def _posting_row(p) -> dict:
@@ -678,6 +756,10 @@ def _posting_row(p) -> dict:
         # block2_generic. getattr keeps a NormalizedJob-shaped test double
         # without the field working.
         "description": getattr(p, "description", "") or "",
+        # run 39. Explicit True/False on every row written from here on; the
+        # column stays NULL only on rows written before the migration, which
+        # is the honest reading of "never evaluated" (see wd_006).
+        "cam_flag": bool(cam_signals(getattr(p, "description", "") or "")),
     }
 
 
@@ -701,6 +783,7 @@ def _reuse_cached(run_id: int, group: FirmGroup, cached: dict) -> dict:
                     if cached["icp_status"] == "qualified" else None),
     )
     dbc.insert_postings(run_id, firm["id"], [_posting_row(p) for p in group.postings])
+    firm["cam_flag"] = group.cam_flag
     return firm
 
 

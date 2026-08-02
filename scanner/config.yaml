@@ -54,7 +54,8 @@ title_patterns:
   - 'property\s+management\s+account(ant|ing)'
   - 'payroll\s+account(ant|ing)'
   - 'lease\s+administrat(ion|or)'
-  - '(property|fund)\s+controller'
+  - '(property|real\s*estate|fund)\s+controller'
+  - 'bookkeep(er|ing)'   # title word, not a firm word: no collision with firm names
   - '(staff|senior|corporate)\s+accountant'
   - 'accounting\s+manager'
   - 'assistant\s+controller'
@@ -69,6 +70,7 @@ title_patterns:
   - '(real\s*estate|cre|multifamily|commercial)\s+underwriter'
   - 'underwrit(er|ing).{0,40}(real\s*estate|cre|multifamily)'
   - 'investor\s+relations(\s+(analyst|associate|manager))?'
+  - 'investor\s+reporting(\s+(analyst|associate|manager))?'
   # ── Asset ──
   - 'asset\s+(management\s+)?analyst'
   - 'asset\s+manager'
@@ -79,7 +81,14 @@ title_patterns:
   - 'treasury\s+analyst'
   - 'financial\s+reporting\s+(analyst|associate|manager)'
   - 'valuations?\s+(analyst|associate|manager)'
-  - 'tax\s+(analyst|associate|manager|accountant)'
+  # Tax needs an asset class in the title. Run 39: the bare
+  # 'tax\s+(analyst|associate|manager|accountant)' admitted "Tax Accountant -
+  # In-Store (QUEENS)" (retail tax prep) and "CPA / Tax Accountant (US
+  # Individual Tax 1040)". Both directions, because the qualifier can lead
+  # ("Real Estate Tax Manager") or trail ("Tax Manager - Construction & Real
+  # Estate", run 39's legitimate hit). Role words unchanged.
+  - 'tax\s+(analyst|associate|manager|accountant).{0,40}(real\s*estate|property|construction|fund|partnership|reit|multifamily|commercial)'
+  - '(real\s*estate|property|construction|fund|partnership|reit|multifamily|commercial).{0,40}tax\s+(analyst|associate|manager|accountant)'
   - 'compliance\s+(analyst|associate|manager)'
   - '(loan|asset)\s+servicing(\s+(analyst|associate|specialist))?'
   # ── Accounts payable / receivable / billing ──
@@ -87,7 +96,14 @@ title_patterns:
   - '(accounts?\s+receivable|a/r|billing)\s+(specialist|analyst|coordinator|clerk|accountant)'
   # ── Real-estate operations analysts ──
   - 'lease\s+analyst'
-  - 'cam\s+analyst'
+  # 'cam\s+analyst' removed run 39. 890+ CAM-reconciliation postings on Indeed
+  # carry titles like Property Accountant, Senior Accountant and Real Estate
+  # Controller: "CAM Analyst" is not a title the market uses, so the pattern
+  # matched nothing and its TinyFish target burned 5-8 min a run hunting it.
+  # The cam alternative inside the first accounting pattern above stays -- that
+  # one matches real titles ("CAM Accountant"). The work itself is now found
+  # where it actually appears, in the description: see cam_flag in
+  # src/signal_pipeline.py.
 
 # Drop a posting even if a title_pattern above matched. Exclusions always win.
 title_exclude_patterns:
@@ -102,9 +118,15 @@ connectors:
   aggregator:
     enabled: true
     provider: jsearch
+    # US only since run 39. Canada produced 0 qualified firms across every run
+    # on record, and the JSearch quota is per-request, not per-country: each
+    # country multiplies the query list. Full role coverage of one market beats
+    # partial coverage of two.
     countries:
       - us
-      - ca
+    # 28 queries x 1 country. Every one of these has a matching entry in
+    # title_patterns below -- a query whose own phrase no pattern matches
+    # spends quota on postings the title filter then drops.
     queries:
       - property accountant
       - staff accountant
@@ -126,6 +148,15 @@ connectors:
       - family office accountant
       - treasury analyst
       - tax accountant
+      # Added run 39, with the Canada slot's freed quota.
+      - real estate controller
+      - fund controller
+      - portfolio accountant
+      - lease analyst
+      - acquisitions analyst
+      - asset management analyst
+      - investor reporting analyst
+      - property bookkeeper
   # ATS feeds — free, no key. ats: greenhouse|lever|ashby|workable|
   # smartrecruiters|workday. For workday, token = the careers-page URL.
   ats:
@@ -164,8 +195,9 @@ connectors:
       # - { name: "LinkedIn Canada - Assistant Controller",      url: "https://www.linkedin.com/jobs/search?keywords=Assistant%20Controller&location=Canada&f_TPR=r86400" }
       - { name: "LinkedIn US - Real Estate Accountant",        url: "https://www.linkedin.com/jobs/search?keywords=Real%20Estate%20Accountant&location=United%20States&f_TPR=r86400" }
       # - { name: "LinkedIn Canada - Real Estate Accountant",    url: "https://www.linkedin.com/jobs/search?keywords=Real%20Estate%20Accountant&location=Canada&f_TPR=r86400" }
-      - { name: "LinkedIn US - CAM Analyst",                   url: "https://www.linkedin.com/jobs/search?keywords=CAM%20Analyst&location=United%20States&f_TPR=r86400" }
-      # - { name: "LinkedIn Canada - CAM Analyst",               url: "https://www.linkedin.com/jobs/search?keywords=CAM%20Analyst&location=Canada&f_TPR=r86400" }
+      # CAM Analyst target dropped run 39: the market does not use that title
+      # (see the title_patterns note above). CAM work is detected from the
+      # posting description now, not hunted by title.
       - { name: "LinkedIn US - Lease Administrator",           url: "https://www.linkedin.com/jobs/search?keywords=Lease%20Administrator&location=United%20States&f_TPR=r86400" }
       # - { name: "LinkedIn Canada - Lease Administrator",       url: "https://www.linkedin.com/jobs/search?keywords=Lease%20Administrator&location=Canada&f_TPR=r86400" }
       - { name: "LinkedIn US - Lease Analyst",                 url: "https://www.linkedin.com/jobs/search?keywords=Lease%20Analyst&location=United%20States&f_TPR=r86400" }
@@ -301,6 +333,7 @@ poc_enrichment:
     - Quest Financial
     - Segrera Associates
     - Orion Placement             # redundant with "Placement" above; kept for readability
+    - HBK CPAs & Consultants    # added via /block, run 39
 
 # Phone access — off by default (the app only serves 127.0.0.1, this PC).
 # Turn on to also install this as an app on your phone: set

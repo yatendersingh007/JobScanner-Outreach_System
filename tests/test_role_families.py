@@ -77,6 +77,10 @@ def test_family_for_each_title_named_in_the_spec(title, expected):
     ("Assistant Controller", "controller"),
     ("Corporate Controller", "controller"),
     ("Senior Fund Accountant", "fund_accounting"),
+    # role_families keeps its own "cam analyst" title, unaffected by run 39
+    # dropping the scanner PATTERN: the two tables are independent, and a
+    # title the scanner no longer surfaces still maps correctly if it ever
+    # arrives from another source.
     ("CAM Analyst", "lease_admin"),
     ("Lease Administration Specialist", "lease_admin"),
     ("Treasury Analyst (Hybrid)", "treasury"),
@@ -98,9 +102,9 @@ def test_unmatched_titles_fall_to_the_controller_default(title):
 
 
 def test_every_aggregator_query_maps_to_a_family():
-    """All 20 JSearch queries in scanner/config.yaml."""
+    """All 28 JSearch queries in scanner/config.yaml (8 added run 39)."""
     queries = _aggregator_queries()
-    assert len(queries) == 20
+    assert len(queries) == 28
     for query in queries:
         family = rf.family_for_title(query)
         assert family.key in rf.BY_KEY
@@ -142,6 +146,20 @@ def test_aggregator_and_tinyfish_family_assignment_is_stable():
         "family office accountant": "controller",
         "treasury analyst": "treasury",
         "tax accountant": "controller",
+        # Added run 39. Three of these reach a family by rule; the other five
+        # land on the controller DEFAULT, in the same way "corporate
+        # accountant" and "project accountant" above already do. Recorded
+        # rather than fixed: re-homing "portfolio accountant" to fund
+        # accounting or "property bookkeeper" to property accounting is a
+        # role-table decision, not a scanner-scope one.
+        "real estate controller": "controller",
+        "fund controller": "controller",
+        "portfolio accountant": "controller",          # default
+        "lease analyst": "lease_admin",
+        "acquisitions analyst": "underwriting",
+        "asset management analyst": "underwriting",
+        "investor reporting analyst": "controller",    # default
+        "property bookkeeper": "controller",           # default
     }
 
 
