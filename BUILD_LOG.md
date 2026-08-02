@@ -3861,3 +3861,70 @@ values by name, so the next appended column cannot break them the same way.
 
 1108 tests pass, up from 1027. 81 new in `tests/test_run39_scope.py`. No
 vendored `.py` touched. No scan command run.
+
+## /parked: the worklist of firms waiting on a decision - 2026-08-02
+
+A park is the one verdict that stalls until a human acts, and until now the
+only way to see one was to still have the run summary in the chat. `/parked`
+lists them across every run, newest first, capped at 15 with an "and N more"
+tail, and closes with the two commands that clear them.
+
+Live output against the 16 parked rows on file:
+
+```
+PARKED 16, showing the 15 most recent:
+  The Greenbrier Hotel, aum_unverified (run 39)
+  Second Century Ventures, aum_unverified (run 37)
+  ...
+  Syntax Talent Solutions, aum_unverified (run 10)
+  ...and 1 more
+/qualify "Firm" <AUM> to rescue, /disqualify "Firm" to reject.
+```
+
+### The cap goes into the query
+
+`dbc.parked_firms_recent(limit)` returns `(rows, total)`: `LIMIT` on the rows,
+`COUNT(*)` for the total. Slicing a full fetch in Python would read every
+parked row ever written in order to print 15 of them, which defeats the cap as
+that list grows.
+
+New function rather than a change to the existing `parked_firms()`, which is
+unlimited, oldest-first, and per-run when given a `run_id`. Nothing in `src/`
+calls it today, so changing its ORDER BY would have been safe and still wrong:
+two different questions deserve two functions.
+
+Ordered by `id DESC`, the same recency proxy `parked_firm_by_name()` already
+uses. `gated_at` is the more literal answer but it is nullable (an
+infrastructure park never reaches the gate) and a NULL sorts unpredictably into
+the middle.
+
+### One firm, one line
+
+Park reasons vary by two orders of magnitude, so truncation is structural, not
+cosmetic. Every reason currently on file is terse, 14 to 23 characters
+(`aum_unverified`, `firm_identity_ambiguous`) because they come from the gate
+itself. Workflow D's own post-gate parks write prose: the `no_structure_signal`
+reason is a ~250-character paragraph quoting the firm's self-description. None
+of those are in the DB yet only because no scan has run since they were added.
+Fifteen of them would be an unreadable wall, and `wd_telegram._split` would
+break it across several messages.
+
+So reasons collapse whitespace and truncate at 90 characters. The full text
+stays on the row and in the run summary. Longest line in the live render: 62
+characters.
+
+Three fallbacks, none of them blank: `park_reason`, then `icp_reason` (the
+same order `summarize()` uses, for rows predating `park_source`), then "no
+reason recorded". A missing firm name renders "unnamed firm" rather than
+"None".
+
+A DB failure sends a message instead of raising, the same shape as
+`/blocklist`: a handler must never take the poll loop down.
+
+22 tests. The three the brief asked for (empty, one, >15) plus the cap
+boundary in both directions, the limit actually reaching the query, ordering
+preserved rather than silently re-sorted, both truncation paths, all three
+reason fallbacks, the `@botname` suffix form, and `/parkedd` still falling
+through to unknown-command.
+
+1130 tests pass, up from 1108. No vendored file touched. No scan command run.

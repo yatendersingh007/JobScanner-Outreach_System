@@ -445,6 +445,51 @@ def _handle_blocklist() -> None:
     tg.send(chr(10).join(lines))
 
 
+# A park is the one verdict that waits on a human, so this list is a worklist:
+# every line has to be short enough to scan and to act on with /qualify or
+# /disqualify. Hence the cap and the truncation.
+#
+# Park reasons vary by two orders of magnitude. The gate's own are terse
+# ("aum_unverified", "firm_identity_ambiguous", 14-23 chars on every row
+# currently on file), but Workflow D's post-gate parks write full prose -- the
+# no_structure_signal reason is a ~250-character paragraph quoting the firm's
+# self-description. Fifteen of those is an unreadable wall that wd_telegram's
+# _split would break across several messages. Truncated here for the list; the
+# full text is still on the row and still in the run summary.
+_PARKED_LIST_CAP = 15
+_PARKED_REASON_MAX = 90
+
+
+def _park_reason_text(firm: dict) -> str:
+    """One firm, one line. Falls back the same way summarize() does, then to
+    an explicit note rather than a blank where a reason should be."""
+    reason = (firm.get("park_reason") or firm.get("icp_reason") or "").strip()
+    reason = " ".join(reason.split()) or "no reason recorded"
+    if len(reason) > _PARKED_REASON_MAX:
+        reason = reason[:_PARKED_REASON_MAX - 3].rstrip() + "..."
+    return reason
+
+
+def _handle_parked() -> None:
+    try:
+        rows, total = dbc.parked_firms_recent(_PARKED_LIST_CAP)
+    except Exception as e:  # noqa: BLE001
+        tg.send(f"Could not read the parked firms ({type(e).__name__}: {e}).")
+        return
+    if not total:
+        tg.send("No parked firms.")
+        return
+    header = (f"PARKED {total}:" if total <= len(rows)
+              else f"PARKED {total}, showing the {len(rows)} most recent:")
+    lines = [header]
+    lines += [f"  {f.get('firm_name') or 'unnamed firm'}, {_park_reason_text(f)} "
+              f"(run {f.get('run_id')})" for f in rows]
+    if total > len(rows):
+        lines.append(f"  ...and {total - len(rows)} more")
+    lines.append('/qualify "Firm" <AUM> to rescue, /disqualify "Firm" to reject.')
+    tg.send(chr(10).join(lines))
+
+
 def _handle_disqualify(arg: str) -> None:
     firm, _rest = parse_quoted(arg)
     if not firm:
@@ -513,6 +558,8 @@ def _help_text() -> str:
         "The opt-out, not the default.\n"
         f"/scan days N           - catch-up window after a gap (1-{config.MAX_SCAN_DAYS}).\n"
         "/status                - last run's buckets, spend, queue depth.\n"
+        f"/parked                - every parked firm awaiting a decision "
+        f"(newest {_PARKED_LIST_CAP}).\n"
         '/qualify "Firm" <AUM>  - rescue a parked firm, e.g. /qualify "Acme" 800M\n'
         '/disqualify "Firm"     - reject a parked firm\n'
         "/cancel (or /scan stop) - stop the active run cleanly, after the "
@@ -559,6 +606,8 @@ def _dispatch(text: str, chat_id: Optional[str] = None) -> None:
         _handle_unblock(arg)
     elif cmd == "blocklist":
         _handle_blocklist()
+    elif cmd == "parked":
+        _handle_parked()
     elif cmd in ("start", "help"):
         tg.send(_help_text())
     else:

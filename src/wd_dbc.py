@@ -338,6 +338,31 @@ def parked_firms(run_id: Optional[int] = None) -> list[dict]:
         return cur.fetchall()
 
 
+def parked_firms_recent(limit: int) -> tuple[list[dict], int]:
+    """The most recently gated parked firms, newest first, plus the TOTAL
+    parked count so the caller can report what it is not showing.
+
+    Separate from parked_firms() above rather than a change to it: that one is
+    unlimited and oldest-first, and per-run when given a run_id. This one
+    exists for /parked, which wants a capped newest-first view across every
+    run. Counting in SQL instead of len()-ing an unlimited fetch keeps it
+    O(limit) as the parked list grows -- the whole point of the cap.
+
+    Ordered by id DESC, the same proxy for recency parked_firm_by_name() uses.
+    gated_at would be the more literal answer but it is nullable (an
+    infrastructure park never reaches the gate), and a NULL sorts unpredictably
+    into the middle of the list.
+    """
+    with cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM wd_firms WHERE icp_status='parked'")
+        total = (cur.fetchone() or {}).get("n", 0)
+        cur.execute(
+            "SELECT * FROM wd_firms WHERE icp_status='parked' ORDER BY id DESC LIMIT %s",
+            (limit,),
+        )
+        return cur.fetchall(), total
+
+
 def parked_firm_by_name(firm_name: str) -> Optional[dict]:
     with cursor() as cur:
         cur.execute(
