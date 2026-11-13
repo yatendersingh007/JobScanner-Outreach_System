@@ -136,7 +136,7 @@ Partners). Do not weaken it.
 ## Environment
 
 - Local: Windows, VS Code, Python venv. Tests run here.
-- VM: Azure Ubuntu 24 at 172.174.154.60, user `azureuser`, service user
+- VM: Azure Ubuntu 24 (host and login user in the private deploy notes), service user
   `outreach`. Already runs `outreach-bot` (A) and `referral-bot` (C) as
   systemd units, shared Postgres db `outreach`, LibreOffice for PPTX->PDF,
   five-key Tavily pool.
